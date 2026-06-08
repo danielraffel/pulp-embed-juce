@@ -1,12 +1,63 @@
 #include "PulpEmbedComponent.h"
 
+#include <juce_audio_processors/juce_audio_processors.h>  // bind to a real processor
+
 #include <cstdlib>
+#include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace pulp_juce {
 
+// Maps the embedded design's control keys to a juce::AudioProcessor's
+// parameters and trampolines the flat-C host callbacks into JUCE calls.
+// host_ctx (PulpEmbedDesc.host_ctx) is a pointer to one of these. Lives as long
+// as the component; the view is torn down before it (see ~PulpEmbedComponent).
+struct PulpEmbedComponent::HostBridge {
+    explicit HostBridge(juce::AudioProcessor& p) : proc(p) {}
+
+    juce::AudioProcessor& proc;
+    std::unordered_map<std::string, juce::AudioProcessorParameter*> byKey;
+    std::vector<std::pair<std::string, juce::AudioProcessorParameter*>> bound;
+    std::vector<float> lastPushed;  // last value pushed UI<-host, per bound entry
+
+    juce::AudioProcessorParameter* find(const char* key) {
+        const auto it = byKey.find(key);
+        return it == byKey.end() ? nullptr : it->second;
+    }
+
+    // ── flat-C host callbacks (UI -> host). ctx == this. ────────────────────
+    static void setParam(void* ctx, const char* key, double normalized) {
+        if (auto* p = static_cast<HostBridge*>(ctx)->find(key))
+            p->setValueNotifyingHost((float) juce::jlimit(0.0, 1.0, normalized));
+    }
+    static double getParam(void* ctx, const char* key) {
+        if (auto* p = static_cast<HostBridge*>(ctx)->find(key)) return p->getValue();
+        return 0.0;
+    }
+    static void beginGesture(void* ctx, const char* key) {
+        if (auto* p = static_cast<HostBridge*>(ctx)->find(key)) p->beginChangeGesture();
+    }
+    static void endGesture(void* ctx, const char* key) {
+        if (auto* p = static_cast<HostBridge*>(ctx)->find(key)) p->endChangeGesture();
+    }
+};
+
 PulpEmbedComponent::PulpEmbedComponent(const juce::File& source,
                                        int logicalWidth, int logicalHeight) {
+    createView(source, logicalWidth, logicalHeight);
+}
+
+PulpEmbedComponent::PulpEmbedComponent(const juce::File& source,
+                                       int logicalWidth, int logicalHeight,
+                                       juce::AudioProcessor& processor)
+    : bridge_(std::make_unique<HostBridge>(processor)) {
+    createView(source, logicalWidth, logicalHeight);
+}
+
+void PulpEmbedComponent::createView(const juce::File& source,
+                                    int logicalWidth, int logicalHeight) {
     setSize(logicalWidth, logicalHeight);
 
     PulpEmbedDesc desc{};
@@ -19,14 +70,26 @@ PulpEmbedComponent::PulpEmbedComponent(const juce::File& source,
     desc.design_width = logicalWidth;
     desc.design_height = logicalHeight;
 
+    // Wire the host parameter bridge when constructed with a processor. The
+    // callbacks must be in the desc at creation time (host_ctx is captured
+    // then), so this happens before pulp_embed_create_*.
+    if (bridge_ != nullptr) {
+        desc.host_ctx = bridge_.get();
+        desc.host.set_param = &HostBridge::setParam;
+        desc.host.get_param = &HostBridge::getParam;
+        desc.host.begin_gesture = &HostBridge::beginGesture;
+        desc.host.end_gesture = &HostBridge::endGesture;
+    }
+
     const auto path = source.getFullPathName();
     // A directory (importer `--emit js` bundle with ui.js) renders through the
     // high-fidelity scripted-UI path; a .json file uses the lightweight native
     // DesignIR path.
+    const bool isBundle =
+        source.isDirectory() || source.getChildFile("ui.js").existsAsFile();
     PulpEmbedResult r =
-        (source.isDirectory() || source.getChildFile("ui.js").existsAsFile())
-            ? pulp_embed_create_from_ui_bundle(&desc, path.toRawUTF8(), &view_)
-            : pulp_embed_create_from_design_json(&desc, path.toRawUTF8(), &view_);
+        isBundle ? pulp_embed_create_from_ui_bundle(&desc, path.toRawUTF8(), &view_)
+                 : pulp_embed_create_from_design_json(&desc, path.toRawUTF8(), &view_);
     if (r != PULP_EMBED_OK || view_ == nullptr) {
         view_ = nullptr;
         return;
@@ -43,17 +106,68 @@ PulpEmbedComponent::PulpEmbedComponent(const juce::File& source,
     nsView_.setBounds(getLocalBounds());
    #endif
 
-    startTimerHz(30);  // drives notify_attached retry + pulp_embed_tick
+    resolveParameterBindings();
+
+    startTimerHz(30);  // drives notify_attached retry + pulp_embed_tick + host->UI
 
     // Dev hot-reload: for a bundle, remember its ui.js and auto-enable the
     // watcher when PULP_EMBED_HOT_RELOAD is set in the environment.
-    const bool isBundle =
-        source.isDirectory() || source.getChildFile("ui.js").existsAsFile();
     if (isBundle) {
         watchFile_ = source.isDirectory() ? source.getChildFile("ui.js") : source;
         if (std::getenv("PULP_EMBED_HOT_RELOAD") != nullptr)
             enableBundleHotReload(true);
     }
+}
+
+void PulpEmbedComponent::resolveParameterBindings() {
+    if (bridge_ == nullptr || view_ == nullptr) return;
+
+    // Index the processor's parameters by their string ID (e.g. APVTS
+    // ParameterID). Parameters without a string ID can't be addressed by the
+    // design's key contract and are skipped.
+    std::unordered_map<std::string, juce::AudioProcessorParameter*> byId;
+    for (auto* p : bridge_->proc.getParameters())
+        if (auto* wid = dynamic_cast<juce::AudioProcessorParameterWithID*>(p))
+            byId[wid->paramID.toStdString()] = p;
+
+    // Map each design control key to a matching parameter ID. Unmatched keys
+    // stay visual-only (no binding) — never guessed.
+    const int32_t n = pulp_embed_param_count(view_);
+    for (int32_t i = 0; i < n; ++i) {
+        char key[256] = {0};
+        pulp_embed_param_key(view_, i, key, sizeof key);
+        const auto it = byId.find(key);
+        if (it == byId.end()) continue;
+        bridge_->byKey[key] = it->second;
+        bridge_->bound.emplace_back(key, it->second);
+    }
+    bridge_->lastPushed.assign(bridge_->bound.size(), -1.0f);
+
+    // Push initial values UI<-host so controls reflect the current state on open.
+    for (size_t i = 0; i < bridge_->bound.size(); ++i) {
+        const float v = bridge_->bound[i].second->getValue();
+        pulp_embed_param_changed(view_, bridge_->bound[i].first.c_str(), v);
+        bridge_->lastPushed[i] = v;
+    }
+}
+
+void PulpEmbedComponent::pumpHostToUi() {
+    if (bridge_ == nullptr || view_ == nullptr) return;
+    // Poll bound parameters on the UI thread (pulp_embed_param_changed is
+    // UI-thread-only) and push host-side changes — automation, preset recall,
+    // a sibling editor — into the matching control. Cheap float compares; fine
+    // for the hundreds-of-params case at 30 Hz.
+    for (size_t i = 0; i < bridge_->bound.size(); ++i) {
+        const float v = bridge_->bound[i].second->getValue();
+        if (v != bridge_->lastPushed[i]) {
+            pulp_embed_param_changed(view_, bridge_->bound[i].first.c_str(), v);
+            bridge_->lastPushed[i] = v;
+        }
+    }
+}
+
+int PulpEmbedComponent::boundParameterCount() const noexcept {
+    return bridge_ != nullptr ? static_cast<int>(bridge_->bound.size()) : 0;
 }
 
 void PulpEmbedComponent::enableBundleHotReload(bool enable) {
@@ -73,6 +187,9 @@ PulpEmbedComponent::~PulpEmbedComponent() {
     nsView_.setView(nullptr);
    #endif
     if (view_ != nullptr) {
+        // Destroy the view (and thus any in-flight host callbacks) before
+        // bridge_ is freed — bridge_ is a member destroyed after this body, so
+        // host_ctx stays valid for the lifetime of the view.
         pulp_embed_destroy(view_);
         view_ = nullptr;
     }
@@ -143,6 +260,7 @@ void PulpEmbedComponent::timerCallback() {
             opened_ = true;
     }
     pulp_embed_tick(view_);
+    pumpHostToUi();
 
     // Dev hot-reload: poll the bundle's ui.js mtime; apply a change only after it
     // has been stable for one tick (debounce vs a mid-write save). reload_bundle

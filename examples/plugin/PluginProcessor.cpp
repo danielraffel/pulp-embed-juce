@@ -1,10 +1,26 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+juce::AudioProcessorValueTreeState::ParameterLayout
+PulpEmbedJuceProcessor::createParameterLayout() {
+    // Parameter IDs double as the embedded design's control keys: a design
+    // control whose key is "gain" / "mix" binds to these. Demonstrates the
+    // adapter's host parameter bridge (PulpEmbedComponent's processor ctor).
+    return {
+        std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{"gain", 1}, "Gain",
+            juce::NormalisableRange<float>(0.0f, 1.0f), 0.8f),
+        std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{"mix", 1}, "Dry/Wet",
+            juce::NormalisableRange<float>(0.0f, 1.0f), 1.0f),
+    };
+}
+
 PulpEmbedJuceProcessor::PulpEmbedJuceProcessor()
     : AudioProcessor(BusesProperties()
                          .withInput("Input", juce::AudioChannelSet::stereo(), true)
-                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)) {}
+                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      apvts(*this, nullptr, juce::Identifier("PARAMS"), createParameterLayout()) {}
 
 void PulpEmbedJuceProcessor::prepareToPlay(double, int) {}
 

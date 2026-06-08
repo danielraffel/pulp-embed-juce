@@ -19,11 +19,17 @@ Figma frame) as a `juce::Component` inside any JUCE app or plugin.
   (lightweight native widgets).
 - A real `juce_add_plugin` target (`PulpEmbedJucePlugin`) in **VST3 + AU +
   Standalone** whose `AudioProcessorEditor` IS the embedded Pulp design.
-- **Interactive parameters (ABI v3):** the design's controls bind
-  bidirectionally to JUCE `AudioProcessorParameter`s by string key — a dragged
-  knob writes the host param (begin/set/end gesture); host automation pushes
-  values back into the control. JUCE maps its own parameters to the design's
-  keys.
+- **Interactive parameters:** construct `PulpEmbedComponent` with a
+  `juce::AudioProcessor&` and the design's controls bind **bidirectionally** to
+  its `AudioProcessorParameter`s — a dragged knob writes the host param
+  (begin/set/end gesture); host automation / preset recall pushes values back
+  into the control (polled on the 30 Hz tick). The bind key is the **control's
+  widget id == the JUCE parameter ID** (e.g. APVTS `ParameterID`); unmatched
+  controls stay visual-only. `boundParameterCount()` reports how many resolved.
+  (Before this, the C ABI exposed the bridge but the JUCE wrapper never wired
+  it, so embedded knobs were visual-only.) The example plugin demonstrates it
+  with real APVTS params; point `PULP_EMBED_BUNDLE` at a param-bound bundle to
+  see a non-zero bind count (the bundled figma demo is visual-only → binds 0).
 - Resize (`resized()` → `pulp_embed_resize`) and a 30 Hz tick timer; teardown
   in correct ownership order (null the `NSViewComponent` before
   `pulp_embed_destroy`).
@@ -110,9 +116,17 @@ which the watcher can't see). Full guide:
 ```cpp
 #include "PulpEmbedComponent.h"
 
+// Visual-only:
 auto* ui = new pulp_juce::PulpEmbedComponent(
     juce::File("design.ir.json"), 1000, 600);
 setContentOwned(ui, true);   // add to a window / editor like any Component
+
+// Interactive — bind the design's controls to your processor's parameters.
+// Control widget id == JUCE parameter ID; bidirectional (UI gesture -> param,
+// automation -> UI). `processor` must outlive the component.
+auto* ui = new pulp_juce::PulpEmbedComponent(
+    juce::File("design.ir.json"), 1000, 600, processor /* juce::AudioProcessor& */);
+// ui->boundParameterCount() -> how many controls resolved to a parameter.
 ```
 
 `PulpEmbedComponent` uses **host-parents mode**: it takes Pulp's child native

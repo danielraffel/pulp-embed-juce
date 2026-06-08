@@ -31,9 +31,23 @@ public:
     const juce::String getProgramName(int) override { return {}; }
     void changeProgramName(int, const juce::String&) override {}
 
-    void getStateInformation(juce::MemoryBlock&) override {}
-    void setStateInformation(const void*, int) override {}
+    void getStateInformation(juce::MemoryBlock& dest) override {
+        if (auto state = apvts.copyState(); state.isValid())
+            if (auto xml = state.createXml())
+                copyXmlToBinary(*xml, dest);
+    }
+    void setStateInformation(const void* data, int size) override {
+        if (auto xml = getXmlFromBinary(data, size))
+            apvts.replaceState(juce::ValueTree::fromXml(*xml));
+    }
+
+    // Real APVTS parameters so the embedded design's controls have something to
+    // bind to (a dragged knob writes these; automation pushes them back into the
+    // UI). The parameter IDs ARE the design control keys. Replaces the old
+    // zero-parameter passthrough that left the adapter's param bridge unexercised.
+    juce::AudioProcessorValueTreeState apvts;
 
 private:
+    static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PulpEmbedJuceProcessor)
 };

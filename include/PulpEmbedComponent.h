@@ -13,6 +13,8 @@
 
 #include <memory>
 
+namespace juce { class AudioProcessor; }  // fwd — full type only needed in the .cpp
+
 namespace pulp_juce {
 
 class PulpEmbedComponent : public juce::Component,
@@ -24,7 +26,26 @@ public:
     // logical size (also used as the design viewport pin).
     PulpEmbedComponent(const juce::File& source,
                        int logicalWidth, int logicalHeight);
+
+    // Same, but bind the design's controls to a juce::AudioProcessor's
+    // parameters by string key (the design control key == the JUCE parameter
+    // ID, e.g. APVTS ParameterID). Wires the pulp_view_embed host bridge so a
+    // dragged knob writes the host parameter with begin/set/end gestures, and
+    // host automation / preset recall pushes values back into the matching
+    // control (polled on the 30 Hz tick). Controls whose key has no matching
+    // JUCE parameter stay visual-only. `processor` must outlive this component.
+    //
+    // This is the surface real plugins need: without it the embedded UI renders
+    // but no knob drives a parameter and no automation moves the UI.
+    PulpEmbedComponent(const juce::File& source,
+                       int logicalWidth, int logicalHeight,
+                       juce::AudioProcessor& processor);
     ~PulpEmbedComponent() override;
+
+    // Count of design controls that resolved to a host parameter (0 when
+    // constructed without a processor, or when no design key matched a
+    // parameter ID). Handy for self-checks / "is the bridge live?".
+    int boundParameterCount() const noexcept;
 
     bool isValid() const noexcept { return view_ != nullptr; }
     juce::String lastError() const;
@@ -50,6 +71,19 @@ public:
 
 private:
     void timerCallback() override;
+
+    // Shared construction body: build the desc (wiring the host bridge when
+    // bridge_ is set), create the view, attach it, and start the tick timer.
+    void createView(const juce::File& source, int logicalWidth, int logicalHeight);
+    // After the view exists, map design param keys -> host parameters and push
+    // initial values UI<-host. No-op when bridge_ is null.
+    void resolveParameterBindings();
+    // Push any host-side parameter changes (automation / preset recall) into the
+    // matching controls. Called from the 30 Hz tick. No-op when bridge_ is null.
+    void pumpHostToUi();
+
+    struct HostBridge;  // defined in the .cpp; holds the juce::AudioProcessor map
+    std::unique_ptr<HostBridge> bridge_;
 
    #if JUCE_MAC
     juce::NSViewComponent nsView_;
