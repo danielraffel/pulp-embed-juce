@@ -152,6 +152,20 @@ public:
 
     void resized() override;
 
+    // Hover routing — pulp-view-embed has no platform mouse-tracking code,
+    // so without forwarding these events to `pulp_embed_dispatch_mouse_*`,
+    // `View::set_hovered` is never called and CSS :hover / onMouseEnter /
+    // onMouseLeave never fire in the embedded plugin context, even though
+    // `registerHover(id)` correctly arms the lambdas. JUCE delivers
+    // `mouseMove` to a Component whenever the cursor is over it (no button
+    // required, no opt-in) — this drives hover in the offscreen /
+    // host-composited path where THIS component receives the pointer. In the
+    // native-view path the child NSView receives platform mouse-moved events
+    // directly, so these forwards are simply dormant there.
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseEnter(const juce::MouseEvent& e) override;
+    void mouseExit(const juce::MouseEvent& e) override;
+
 private:
     void timerCallback() override;
 

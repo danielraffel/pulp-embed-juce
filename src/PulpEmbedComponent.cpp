@@ -434,4 +434,40 @@ void PulpEmbedComponent::timerCallback() {
     }
 }
 
+// ── Hover routing ────────────────────────────────────────────────────────
+//
+// pulp-view-embed has no platform mouse-move tracking — without forwarding
+// these events, `View::set_hovered` is never called in the embedded plugin
+// context and CSS :hover / onMouseEnter / onMouseLeave never fire (even
+// though `registerHover(id)` correctly arms the lambdas).
+//
+// Coordinates: JUCE delivers MouseEvent positions in this component's local
+// coords (top-left origin, logical pixels). That matches Pulp's root-view
+// coord space when the wrapping NSViewComponent fills this component
+// (which it does in createView), so we forward the raw x/y.
+//
+// JUCE's `mouseMove` fires whenever the cursor is over the component (no
+// button required) as long as `setInterceptsMouseClicks` allows it AND a
+// parent has called `addMouseListener` (the host editor typically does) —
+// no extra opt-in needed for the default JUCE mouse-move dispatch.
+
+void PulpEmbedComponent::mouseMove(const juce::MouseEvent& e) {
+    if (view_ == nullptr) return;
+    pulp_embed_dispatch_mouse_move(view_,
+                                   static_cast<double>(e.position.x),
+                                   static_cast<double>(e.position.y));
+}
+
+void PulpEmbedComponent::mouseEnter(const juce::MouseEvent& e) {
+    if (view_ == nullptr) return;
+    pulp_embed_dispatch_mouse_move(view_,
+                                   static_cast<double>(e.position.x),
+                                   static_cast<double>(e.position.y));
+}
+
+void PulpEmbedComponent::mouseExit(const juce::MouseEvent&) {
+    if (view_ == nullptr) return;
+    pulp_embed_dispatch_mouse_exit(view_);
+}
+
 }  // namespace pulp_juce
