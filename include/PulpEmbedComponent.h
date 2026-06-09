@@ -137,6 +137,18 @@ public:
 
     void resized() override;
 
+    // Hover routing — pulp-view-embed has no platform mouse-tracking code,
+    // so without forwarding these events to `pulp_embed_dispatch_mouse_*`,
+    // `View::set_hovered` is never called and CSS :hover / onMouseEnter /
+    // onMouseLeave never fire in the embedded plugin context, even though
+    // `registerHover(id)` correctly arms the lambdas. Mouse-move tracking
+    // is opt-in on JUCE Components — we call `setWantsMouseTracking()` in
+    // the ctor so juce::mouseMove fires whenever the cursor is over the
+    // component, not just during drags.
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseEnter(const juce::MouseEvent& e) override;
+    void mouseExit(const juce::MouseEvent& e) override;
+
 private:
     void timerCallback() override;
 
