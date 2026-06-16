@@ -242,4 +242,12 @@ same shape via `juce::HWNDComponent` once `pulp-view-embed` registers a Windows
 
 ## License
 
-MIT.
+MIT for this adapter's own source.
+
+This project **depends on** [JUCE](https://juce.com) but ships no JUCE source
+and vendors no JUCE modules — it resolves JUCE from your own checkout, under
+**your own JUCE license** (AGPLv3 or a commercial JUCE licence). Building and
+distributing a binary from this repo is subject to JUCE's licensing terms, which
+are your responsibility as the builder.
+
+Not affiliated with or endorsed by JUCE or Raw Material Software.
