@@ -470,4 +470,25 @@ void PulpEmbedComponent::mouseExit(const juce::MouseEvent&) {
     pulp_embed_dispatch_mouse_exit(view_);
 }
 
+void PulpEmbedComponent::mouseDown(const juce::MouseEvent& e) {
+    if (view_ == nullptr) return;
+    pulp_embed_dispatch_mouse_down(view_,
+                                   static_cast<double>(e.position.x),
+                                   static_cast<double>(e.position.y));
+}
+
+void PulpEmbedComponent::mouseDrag(const juce::MouseEvent& e) {
+    if (view_ == nullptr) return;
+    pulp_embed_dispatch_mouse_drag(view_,
+                                   static_cast<double>(e.position.x),
+                                   static_cast<double>(e.position.y));
+}
+
+void PulpEmbedComponent::mouseUp(const juce::MouseEvent& e) {
+    if (view_ == nullptr) return;
+    pulp_embed_dispatch_mouse_up(view_,
+                                 static_cast<double>(e.position.x),
+                                 static_cast<double>(e.position.y));
+}
+
 }  // namespace pulp_juce

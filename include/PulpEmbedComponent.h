@@ -165,6 +165,12 @@ public:
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseEnter(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent& e) override;
+    // Press/drag/release forwarding — without these the foreign-host embed never
+    // delivers a button gesture to Pulp, so embedded knobs/faders can't be
+    // dragged. Routes to pulp_embed_dispatch_mouse_down/drag/up.
+    void mouseDown(const juce::MouseEvent& e) override;
+    void mouseDrag(const juce::MouseEvent& e) override;
+    void mouseUp(const juce::MouseEvent& e) override;
 
 private:
     void timerCallback() override;
