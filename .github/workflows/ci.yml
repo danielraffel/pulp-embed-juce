@@ -103,8 +103,34 @@ jobs:
             -DPULP_VIEW_EMBED_DIR="${{ steps.paths.outputs.embed }}" \
             -DPULP_EMBED_JUCE_BUILD_EXAMPLE=ON
 
-      - name: Build adapter + plugin (VST3/AU/Standalone)
-        run: cmake --build build --target PulpEmbedJucePlugin_All -j"$(sysctl -n hw.ncpu)"
+      - name: Build adapter + plugin (VST3/Standalone) + ABI test
+        # AU is deliberately excluded here: JUCE's audio-plugin-client vendors
+        # its OWN AudioUnitSDK, but the installed Pulp SDK exports its vendored
+        # external/AudioUnitSDK/include as a public interface include, so JUCE's
+        # AUBase.cpp resolves the newer capitalized API (Add/Remove) from Pulp's
+        # copy and fails to compile (no member 'add'/'remove'/'foreach'). That
+        # is an upstream Pulp-SDK packaging collision (the SDK should not export
+        # third-party AudioUnitSDK headers publicly) — orthogonal to this
+        # adapter. VST3 + Standalone exercise the SAME editor that hosts
+        # PulpEmbedComponent, and the console ABI test validates the adapter's
+        # string round-trip directly. Track the AU fix in the Pulp SDK repo.
+        run: |
+          cmake --build build \
+            --target PulpEmbedJucePlugin_VST3 \
+                     PulpEmbedJucePlugin_Standalone \
+                     pulp-embed-juce-string-test \
+            -j"$(sysctl -n hw.ncpu)"
+
+      - name: Run headless adapter ABI self-check
+        run: |
+          set -euo pipefail
+          BIN="build/pulp-embed-juce-string-test_artefacts/Release/pulp-embed-juce-string-test"
+          [ -x "$BIN" ] || BIN="$(find build -type f -name 'pulp-embed-juce-string-test' -perm +111 | head -1)"
+          if [ -x "$BIN" ]; then
+            "$BIN"
+          else
+            echo "::error::adapter ABI test binary not found under build/"; exit 1
+          fi
 
       - name: Headless editor self-check (Standalone)
         run: |

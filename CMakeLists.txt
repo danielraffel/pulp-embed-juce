@@ -92,6 +92,13 @@ if(PULP_EMBED_JUCE_BUILD_PLUGIN)
         # Standalone is the plugin wrapped as an app: it builds the SAME
         # AudioProcessorEditor the VST3/AU host opens, so a headless self-check
         # of the Standalone proves the embed renders in the real plugin editor.
+        # AU builds locally against a source Pulp checkout, but fails against
+        # an INSTALLED Pulp SDK: the SDK exports its vendored
+        # external/AudioUnitSDK/include publicly, and JUCE's audio-plugin-client
+        # (which vendors its own AudioUnitSDK) then resolves the wrong,
+        # differently-versioned headers (Add/Remove vs add/remove). The fix
+        # belongs in the Pulp SDK packaging (don't export third-party SDK
+        # headers). CI builds VST3 + Standalone until that lands; see ci.yml.
         FORMATS VST3 AU Standalone
         VST3_CATEGORIES Fx
         AU_MAIN_TYPE kAudioUnitType_Effect
