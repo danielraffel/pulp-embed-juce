@@ -10,6 +10,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_gui_extra/juce_gui_extra.h>  // juce::NSViewComponent (macOS)
 #include <pulp_view_embed.h>
+#include <pulp_view_embed_native.hpp>  // pulp::embed::NativeViewFactory + create_from_view
 
 #include <functional>
 #include <memory>
@@ -42,6 +43,20 @@ public:
     PulpEmbedComponent(const juce::File& source,
                        int logicalWidth, int logicalHeight,
                        juce::AudioProcessor& processor);
+
+    // Mount a HAND-BUILT native Pulp view (a compiled pulp::view::View, typically
+    // a DesignFrameView subclass) instead of an importer-generated design. The
+    // factory builds the root tree on the Pulp side. A DesignFrameView whose
+    // elements carry a param_key binds to the host parameters exactly like the
+    // file-based ctor above (key == JUCE parameter ID); elements without a
+    // param_key stay visual-only. `processor` must outlive this component. This
+    // is the path for a UI authored in C++/Skia rather than imported.
+    PulpEmbedComponent(pulp::embed::NativeViewFactory factory,
+                       int logicalWidth, int logicalHeight,
+                       juce::AudioProcessor& processor);
+    // Same, without a host-parameter bridge (preview / no automation).
+    PulpEmbedComponent(pulp::embed::NativeViewFactory factory,
+                       int logicalWidth, int logicalHeight);
     ~PulpEmbedComponent() override;
 
     // Count of design controls that resolved to a host parameter (0 when
@@ -143,6 +158,12 @@ private:
     // Shared construction body: build the desc (wiring the host bridge when
     // bridge_ is set), create the view, attach it, and start the tick timer.
     void createView(const juce::File& source, int logicalWidth, int logicalHeight);
+    void createViewFromFactory(pulp::embed::NativeViewFactory factory,
+                               int logicalWidth, int logicalHeight);
+    // Shared by both create paths: build the embed descriptor (incl. host bridge
+    // wiring) and run the post-create attach + bind + tick.
+    PulpEmbedDesc buildDesc(int logicalWidth, int logicalHeight) const;
+    void attachAndStart();
     // After the view exists, map design param keys -> host parameters and push
     // initial values UI<-host. No-op when bridge_ is null.
     void resolveParameterBindings();

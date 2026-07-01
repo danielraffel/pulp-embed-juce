@@ -88,10 +88,19 @@ PulpEmbedComponent::PulpEmbedComponent(const juce::File& source,
     createView(source, logicalWidth, logicalHeight);
 }
 
-void PulpEmbedComponent::createView(const juce::File& source,
-                                    int logicalWidth, int logicalHeight) {
-    setSize(logicalWidth, logicalHeight);
+PulpEmbedComponent::PulpEmbedComponent(pulp::embed::NativeViewFactory factory,
+                                       int logicalWidth, int logicalHeight) {
+    createViewFromFactory(std::move(factory), logicalWidth, logicalHeight);
+}
 
+PulpEmbedComponent::PulpEmbedComponent(pulp::embed::NativeViewFactory factory,
+                                       int logicalWidth, int logicalHeight,
+                                       juce::AudioProcessor& processor)
+    : bridge_(std::make_unique<HostBridge>(processor)) {
+    createViewFromFactory(std::move(factory), logicalWidth, logicalHeight);
+}
+
+PulpEmbedDesc PulpEmbedComponent::buildDesc(int logicalWidth, int logicalHeight) const {
     PulpEmbedDesc desc{};
     desc.struct_size = sizeof(PulpEmbedDesc);
     desc.abi_version = PULP_VIEW_EMBED_ABI_VERSION;
@@ -115,6 +124,34 @@ void PulpEmbedComponent::createView(const juce::File& source,
         desc.host.set_string = &HostBridge::setString;
         desc.host.get_string = &HostBridge::getString;
     }
+    return desc;
+}
+
+// Shared post-create steps for every create path: attach Pulp's child view to
+// the JUCE component (macOS), resolve the host-param bindings, and start the
+// 30 Hz tick. Call only after view_ is non-null.
+void PulpEmbedComponent::attachAndStart() {
+   #if JUCE_MAC
+    // Host-parents mode: JUCE owns parenting/retain/resize of Pulp's child view.
+    addAndMakeVisible(nsView_);
+    nsView_.setView(pulp_embed_native_handle(view_));
+    // Size the wrapper to the component immediately. resized() does NOT fire if
+    // the component is already at its final size when content is installed, so
+    // without this the NSViewComponent (and thus Pulp's child NSView) stays 0x0
+    // and never appears on screen.
+    nsView_.setBounds(getLocalBounds());
+   #endif
+
+    resolveParameterBindings();
+
+    startTimerHz(30);  // drives notify_attached retry + pulp_embed_tick + host->UI
+}
+
+void PulpEmbedComponent::createView(const juce::File& source,
+                                    int logicalWidth, int logicalHeight) {
+    setSize(logicalWidth, logicalHeight);
+
+    PulpEmbedDesc desc = buildDesc(logicalWidth, logicalHeight);
 
     const auto path = source.getFullPathName();
     // A directory (importer `--emit js` bundle with ui.js) renders through the
@@ -130,20 +167,7 @@ void PulpEmbedComponent::createView(const juce::File& source,
         return;
     }
 
-   #if JUCE_MAC
-    // Host-parents mode: JUCE owns parenting/retain/resize of Pulp's child view.
-    addAndMakeVisible(nsView_);
-    nsView_.setView(pulp_embed_native_handle(view_));
-    // Size the wrapper to the component immediately. resized() does NOT fire if
-    // the component is already at its final size when content is installed, so
-    // without this the NSViewComponent (and thus Pulp's child NSView) stays 0x0
-    // and never appears on screen.
-    nsView_.setBounds(getLocalBounds());
-   #endif
-
-    resolveParameterBindings();
-
-    startTimerHz(30);  // drives notify_attached retry + pulp_embed_tick + host->UI
+    attachAndStart();
 
     // Dev hot-reload: for a bundle, remember its ui.js and auto-enable the
     // watcher when PULP_EMBED_HOT_RELOAD is set in the environment.
@@ -152,6 +176,24 @@ void PulpEmbedComponent::createView(const juce::File& source,
         if (std::getenv("PULP_EMBED_HOT_RELOAD") != nullptr)
             enableBundleHotReload(true);
     }
+}
+
+void PulpEmbedComponent::createViewFromFactory(pulp::embed::NativeViewFactory factory,
+                                               int logicalWidth, int logicalHeight) {
+    setSize(logicalWidth, logicalHeight);
+
+    PulpEmbedDesc desc = buildDesc(logicalWidth, logicalHeight);
+
+    // Mount the host's compiled View (e.g. a DesignFrameView subclass). Its
+    // param_key'd elements bind through the same host bridge configured above.
+    // No file source, so no hot-reload watcher.
+    PulpEmbedResult r = pulp::embed::pulp_embed_create_from_view(&desc, std::move(factory), &view_);
+    if (r != PULP_EMBED_OK || view_ == nullptr) {
+        view_ = nullptr;
+        return;
+    }
+
+    attachAndStart();
 }
 
 void PulpEmbedComponent::resolveParameterBindings() {

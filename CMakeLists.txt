@@ -28,6 +28,16 @@ endif()
 add_subdirectory("${PULP_VIEW_EMBED_DIR}" pulp-view-embed-build)
 
 # ── JUCE ─────────────────────────────────────────────────────────────────
+# JUCE 8.0.x's juce_AudioSampleBuffer.h uses std::alignment_of_v while relying
+# on <type_traits> arriving transitively. Recent Apple libc++ (Xcode 16.3+)
+# removed that transitive include, so the JUCE build fails with
+# "no member named 'alignment_of_v' in namespace 'std'". Force-include
+# <type_traits> for the JUCE targets defined below (directory-scoped, applied
+# only under Apple Clang where the regression lives). Harmless where the header
+# is already present; version-agnostic across JUCE 8.0.x.
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-include$<SEMICOLON>type_traits>)
+endif()
 include(FetchContent)
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
@@ -82,6 +92,13 @@ if(PULP_EMBED_JUCE_BUILD_PLUGIN)
         # Standalone is the plugin wrapped as an app: it builds the SAME
         # AudioProcessorEditor the VST3/AU host opens, so a headless self-check
         # of the Standalone proves the embed renders in the real plugin editor.
+        # AU builds locally against a source Pulp checkout, but fails against
+        # an INSTALLED Pulp SDK: the SDK exports its vendored
+        # external/AudioUnitSDK/include publicly, and JUCE's audio-plugin-client
+        # (which vendors its own AudioUnitSDK) then resolves the wrong,
+        # differently-versioned headers (Add/Remove vs add/remove). The fix
+        # belongs in the Pulp SDK packaging (don't export third-party SDK
+        # headers). CI builds VST3 + Standalone until that lands; see ci.yml.
         FORMATS VST3 AU Standalone
         VST3_CATEGORIES Fx
         AU_MAIN_TYPE kAudioUnitType_Effect
@@ -135,4 +152,24 @@ if(PULP_EMBED_JUCE_BUILD_TESTS)
         pulp_link_fontconfig_after_skia(pulp-embed-juce-string-test)
     endif()
     add_test(NAME string-test COMMAND pulp-embed-juce-string-test)
+
+    # Native-view e2e: mount a hand-built DesignFrameView via the factory ctor and
+    # prove its param_key'd controls bind to a juce::AudioProcessor's parameters.
+    juce_add_console_app(pulp-embed-juce-native-view-test
+        PRODUCT_NAME "pulp-embed-juce-native-view-test")
+    juce_generate_juce_header(pulp-embed-juce-native-view-test)
+    target_sources(pulp-embed-juce-native-view-test PRIVATE examples/native-view-test/main.cpp)
+    target_compile_definitions(pulp-embed-juce-native-view-test PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0)
+    target_link_libraries(pulp-embed-juce-native-view-test PRIVATE
+        pulp_embed_juce
+        juce::juce_audio_processors
+        juce::juce_gui_extra
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    if(COMMAND pulp_link_fontconfig_after_skia)
+        pulp_link_fontconfig_after_skia(pulp-embed-juce-native-view-test)
+    endif()
+    add_test(NAME native-view-test COMMAND pulp-embed-juce-native-view-test)
 endif()
