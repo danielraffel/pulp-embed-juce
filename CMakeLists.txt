@@ -28,6 +28,16 @@ endif()
 add_subdirectory("${PULP_VIEW_EMBED_DIR}" pulp-view-embed-build)
 
 # ── JUCE ─────────────────────────────────────────────────────────────────
+# JUCE 8.0.x's juce_AudioSampleBuffer.h uses std::alignment_of_v while relying
+# on <type_traits> arriving transitively. Recent Apple libc++ (Xcode 16.3+)
+# removed that transitive include, so the JUCE build fails with
+# "no member named 'alignment_of_v' in namespace 'std'". Force-include
+# <type_traits> for the JUCE targets defined below (directory-scoped, applied
+# only under Apple Clang where the regression lives). Harmless where the header
+# is already present; version-agnostic across JUCE 8.0.x.
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-include$<SEMICOLON>type_traits>)
+endif()
 include(FetchContent)
 FetchContent_Declare(JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
