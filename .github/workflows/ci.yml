@@ -74,8 +74,8 @@ jobs:
           fi
           mkdir -p "${PREFIX}"
           tar xzf "${RUNNER_TEMP}/pulp-sdk.tar.gz" -C "${RUNNER_TEMP}"
-          inner="$(find "${RUNNER_TEMP}" -maxdepth 1 -type d -name 'pulp-sdk-*' | head -1)"
-          if [ -n "${inner}" ]; then cp -a "${inner}/." "${PREFIX}/"; fi
+          inner="$(find "${RUNNER_TEMP}" -maxdepth 1 -type d -name 'pulp-sdk*' | head -1)"
+          if [ -n "${inner}" ] && [ "${inner}" != "${PREFIX}" ]; then cp -a "${inner}/." "${PREFIX}/"; fi
           test -f "${PREFIX}/lib/cmake/Pulp/PulpConfig.cmake" \
             || { echo "::error::Unpacked SDK has no lib/cmake/Pulp/PulpConfig.cmake"; exit 1; }
 
