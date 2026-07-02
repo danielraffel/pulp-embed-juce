@@ -31,13 +31,13 @@ struct PulpEmbedComponent::HostBridge : private juce::AudioProcessorListener {
     ~HostBridge() override { proc.removeListener(this); }
 
     juce::AudioProcessor& proc;
-    PulpEmbedComponent*   owner = nullptr;  // for the host-action channel (P2.3)
+    PulpEmbedComponent*   owner = nullptr;  // for the host-action channel
     std::unordered_map<std::string, juce::AudioProcessorParameter*> byKey;
     std::vector<std::pair<std::string, juce::AudioProcessorParameter*>> bound;
     std::vector<float> lastPushed;  // last value pushed UI<-host, per bound entry
 
     // Resolve UI->host writes against the LIVE all-parameters map (findAny),
-    // NOT the static create-time byKey snapshot. Closeout-review MUST-FIX: a
+    // NOT the static create-time byKey snapshot. Previously a
     // paged/dynamic control re-keyed after create (e.g. "slot1.gain") answered
     // has_param=true and rendered display text (metadata used findAny) but its
     // set_param/gesture writes went through byKey, missed, and silently never
@@ -55,7 +55,7 @@ struct PulpEmbedComponent::HostBridge : private juce::AudioProcessorListener {
         // Unknown key: -1.0 sentinel (matches the iPlug2 adapter). The shim
         // treats any [0,1] return as authoritative, so returning 0.0 here forced
         // every UNBOUND imported control to 0 instead of keeping its imported
-        // default (P0.2). An out-of-range value tells the shim "no host opinion".
+        // default. An out-of-range value tells the shim "no host opinion".
         return -1.0;
     }
     static void beginGesture(void* ctx, const char* key) {
@@ -65,7 +65,7 @@ struct PulpEmbedComponent::HostBridge : private juce::AudioProcessorListener {
         if (auto* p = static_cast<HostBridge*>(ctx)->find(key)) p->endChangeGesture();
     }
 
-    // ── runtime host-param accessor backing (ABI v8 adapter half, P1.4) ──────
+    // ── runtime host-param accessor backing (ABI v8 adapter half) ────────────
     // A paramID-keyed view of ALL the processor's parameters (not just the ones
     // a design control bound to at create). Rebuilt lazily when the processor's
     // parameter tree changes, so dynamic/paged controls resolve late-added keys.
@@ -244,7 +244,7 @@ PulpEmbedDesc PulpEmbedComponent::buildDesc(int logicalWidth, int logicalHeight)
     return desc;
 }
 
-// P0.5 — a Debug build of the Skia/Dawn render stack runs roughly ~3x the CPU
+// A Debug build of the Skia/Dawn render stack runs roughly ~3x the CPU
 // of Release (no -O3/NDEBUG, live asserts, no inlining). A UX-perceived "the
 // embed is slow" regression in a Debug build is almost always the build type,
 // not the code. Emit one loud line so anyone measuring in Debug knows to
@@ -282,7 +282,7 @@ void PulpEmbedComponent::attachAndStart() {
 
 void PulpEmbedComponent::createView(const juce::File& source,
                                     int logicalWidth, int logicalHeight) {
-    // P0.3 — do NOT force the design size here. Retain it (design viewport pin
+    // Do NOT force the design size here. Retain it (design viewport pin
     // + configureResizableEditor fallback), but leave the component 0x0 until
     // the owning editor drives a real size; the first non-zero resized() issues
     // the first pulp_embed_resize. Forcing the design size in the ctor and then
@@ -319,7 +319,7 @@ void PulpEmbedComponent::createView(const juce::File& source,
 
 void PulpEmbedComponent::createViewFromFactory(pulp::embed::NativeViewFactory factory,
                                                int logicalWidth, int logicalHeight) {
-    // P0.3 — see createView: retain the design size, don't force it as the
+    // See createView: retain the design size, don't force it as the
     // component size. The owning editor drives size on open.
     logicalWidth_ = logicalWidth;
     logicalHeight_ = logicalHeight;
@@ -389,7 +389,7 @@ int PulpEmbedComponent::boundParameterCount() const noexcept {
     return bridge_ != nullptr ? static_cast<int>(bridge_->bound.size()) : 0;
 }
 
-// ── runtime host-param accessor (ABI v8 adapter half, P1.4) ──────────────────
+// ── runtime host-param accessor (ABI v8 adapter half) ────────────────────────
 
 bool PulpEmbedComponent::hostHasParam(const juce::String& key) const {
     return bridge_ != nullptr && bridge_->findAny(key.toRawUTF8()) != nullptr;
@@ -425,7 +425,7 @@ bool PulpEmbedComponent::hostEndGesture(const juce::String& key) {
     return true;
 }
 
-// ── host action/command channel (ABI v8 adapter half, P2.3) ──────────────────
+// ── host action/command channel (ABI v8 adapter half) ────────────────────────
 
 bool PulpEmbedComponent::dispatchHostAction(const juce::String& action,
                                             const juce::String& argsJson) {
@@ -440,7 +440,7 @@ bool PulpEmbedComponent::dispatchHostAction(const juce::String& action,
     return onHostAction(action, args);
 }
 
-// ── resizable editor helper (Phase 3) ────────────────────────────────────────
+// ── resizable editor helper ──────────────────────────────────────────────────
 
 void PulpEmbedComponent::configureResizableEditor(juce::AudioProcessorEditor& editor) {
     if (view_ == nullptr) return;
@@ -632,7 +632,7 @@ bool PulpEmbedComponent::writeRenderPng(const juce::File& out, int width, int he
 
 void PulpEmbedComponent::resized() {
     if (view_ == nullptr) return;
-    // P0.3 — ignore zero-size layout passes; the first NON-ZERO resized() is the
+    // Ignore zero-size layout passes; the first NON-ZERO resized() is the
     // first pulp_embed_resize (the ctor no longer forces the design size).
     if (getWidth() <= 0 || getHeight() <= 0) return;
    #if JUCE_MAC

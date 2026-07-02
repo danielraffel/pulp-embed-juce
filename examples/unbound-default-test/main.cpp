@@ -1,4 +1,4 @@
-// P0.2 regression — an UNBOUND design control (one whose param_key matches no
+// Regression — an UNBOUND design control (one whose param_key matches no
 // host parameter) must KEEP its imported default value, not snap to 0.
 //
 // The bug: HostBridge::getParam returned 0.0 for an unknown key, and the embed

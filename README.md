@@ -44,7 +44,7 @@ Figma frame) as a `juce::Component` inside any JUCE app or plugin.
 - Real-DAW load (Logic/REAPER/…) is a remaining manual validation step; CI
   covers build + headless render + pluginval-style editor lifecycle.
 
-**Resolved design questions** (from the foreign-host-embedding plan):
+**Resolved design questions** for foreign-host embedding:
 
 - *Event-loop tick* — borrowed from the host: a `juce::Timer` (and the
   display-link inside Pulp's GPU host) drives `pulp_embed_tick`; the adapter

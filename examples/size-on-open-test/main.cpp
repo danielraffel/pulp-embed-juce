@@ -1,4 +1,4 @@
-// P0.3 regression — the ctor must NOT force the design size; the owning editor
+// Regression — the ctor must NOT force the design size; the owning editor
 // drives size, and the first NON-ZERO resized() is the first pulp_embed_resize.
 //
 // The bug: the ctor called setSize(design) and attachAndStart sized the wrapper

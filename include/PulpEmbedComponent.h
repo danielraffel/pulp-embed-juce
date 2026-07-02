@@ -80,7 +80,7 @@ public:
     // Live membership test: true iff `key` currently resolves to a host
     // parameter (== the JUCE parameter ID). Reflects late-added parameters.
     // This is the single source of truth the v8 has_param callback trampolines
-    // into; the -1.0 get_param sentinel (P0.2) stays only as belt-and-braces
+    // into; the -1.0 get_param sentinel stays only as belt-and-braces
     // for pre-v8 runtime libraries.
     bool hostHasParam(const juce::String& key) const;
 
@@ -94,9 +94,9 @@ public:
     // UI->host write seams (the single source of truth the v8 set_param /
     // begin_gesture / end_gesture callbacks trampoline into). They resolve keys
     // against the SAME live parameter map as hostHasParam, so a paged/dynamic
-    // control re-keyed after create writes correctly (closeout-review M1: the
-    // write path previously used a stale create-time snapshot and silently
-    // dropped paged writes). Return true iff `key` resolved to a host parameter.
+    // control re-keyed after create writes correctly (previously the write
+    // path used a stale create-time snapshot and silently dropped paged
+    // writes). Return true iff `key` resolved to a host parameter.
     bool hostWriteParam(const juce::String& key, double normalized);
     bool hostBeginGesture(const juce::String& key);
     bool hostEndGesture(const juce::String& key);
@@ -118,7 +118,7 @@ public:
     // v8 runtime present).
     bool dispatchHostAction(const juce::String& action, const juce::String& argsJson);
 
-    // ── resizable editor helper (Phase 3) ───────────────────────────────────
+    // ── resizable editor helper ──────────────────────────────────────────────
     // Configure the OWNING AudioProcessorEditor for host-window resizing that
     // matches the imported design: reads pulp_embed_size_hints (ABI v7), calls
     // setResizable(true, false), installs a juce::ComponentBoundsConstrainer
@@ -161,7 +161,7 @@ public:
     // (== the designParams() / pulp_embed_param_* ordering). -1.0 if out of range
     // or no view. Reads the LIVE view, so it reflects the value after the
     // host<->UI initial sync — used to verify that an UNBOUND control kept its
-    // imported default (P0.2) instead of snapping to 0.
+    // imported default instead of snapping to 0.
     double controlValue(int index) const;
 
     // Static greenfield entry point: read a design's parameter descriptors WITHOUT
@@ -281,13 +281,13 @@ private:
 
     // The design's logical size (from the ctor). Retained so configureResizableEditor
     // can fall back to it and so resized() can recognise the design base. The ctor
-    // deliberately does NOT force this as the component size (P0.3 size-on-open):
+    // deliberately does NOT force this as the component size (size-on-open):
     // the owning editor drives size, and the first NON-ZERO resized() issues the
     // first pulp_embed_resize — this kills the reopen-while-zoomed double-render.
     int logicalWidth_ = 0;
     int logicalHeight_ = 0;
 
-    // Host-window resize constraint installed by configureResizableEditor (P3);
+    // Host-window resize constraint installed by configureResizableEditor;
     // must outlive the editor's resize interactions, so it lives on the component.
     std::unique_ptr<juce::ComponentBoundsConstrainer> constrainer_;
 

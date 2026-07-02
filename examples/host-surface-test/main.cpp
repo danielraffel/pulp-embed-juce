@@ -1,14 +1,14 @@
-// P1.4 + P2.3 — the runtime host-param accessor and the host-action channel
+// The runtime host-param accessor and the host-action channel
 // (the JUCE adapter halves of ABI v8), exercised through PulpEmbedComponent's
 // public seams WITHOUT needing the v8 runtime present. The same backing is what
 // the v8 has_param / param_display_text / host_action callbacks trampoline into,
 // so proving the seams proves the callbacks.
 //
-// P1.4 focus: has_param is LIVE — a parameter added after construction resolves
+// has_param is LIVE — a parameter added after construction resolves
 // once the processor fires audioProcessorChanged (cache invalidation), matching
 // hosts that swap parameter groups live (paged racks, dynamic slots).
 //
-// P2.3 focus: dispatchHostAction parses the JSON args to a juce::var and invokes
+// dispatchHostAction parses the JSON args to a juce::var and invokes
 // onHostAction (insert/remove/reorder rack slots, load a preset, …).
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -89,7 +89,7 @@ int main() {
         return 1;
     }
 
-    // ── P1.4: runtime host-param accessor ────────────────────────────────────
+    // ── runtime host-param accessor ──────────────────────────────────────────
     check(comp.hostHasParam("gain"), "hostHasParam resolves an existing parameter");
     check(!comp.hostHasParam("rack.slot0.mix"),
           "hostHasParam is false for a not-yet-present key");
@@ -112,7 +112,7 @@ int main() {
     check(comp.hostParamDisplayText("rack.slot0.mix", 1.0).isNotEmpty(),
           "hostParamDisplayText resolves a live-added parameter");
 
-    // ── M1 regression: the UI->host WRITE path is as live as has_param ───────
+    // ── the UI->host WRITE path is as live as has_param ──────────────────────
     // A paged/dynamic control re-keyed to a late-added parameter must actually
     // drive the host, not just report has_param=true. Before the fix, the write
     // path used a stale create-time snapshot and silently dropped these.
@@ -125,7 +125,7 @@ int main() {
     check(!comp.hostWriteParam("does.not.exist", 0.5f),
           "hostWriteParam returns false for an unknown key (no host write)");
 
-    // ── P2.3: host-action channel ────────────────────────────────────────────
+    // ── host-action channel ──────────────────────────────────────────────────
     juce::String gotAction;
     int gotIndex = -1;
     comp.onHostAction = [&](const juce::String& action, const juce::var& args) {

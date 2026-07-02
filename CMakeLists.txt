@@ -184,7 +184,7 @@ if(PULP_EMBED_JUCE_BUILD_TESTS)
     add_test(NAME native-view-test COMMAND pulp-embed-juce-native-view-test)
 
     # Helper: a headless console test target that links the adapter + the JUCE
-    # modules its native-view path needs. Keeps the three P0/P1/P2 regressions
+    # modules its native-view path needs. Keeps the regression tests
     # DRY (they share the exact same link surface as native-view-test).
     function(pulp_embed_juce_add_console_test name src)
         juce_add_console_app(${name} PRODUCT_NAME "${name}")
@@ -202,19 +202,19 @@ if(PULP_EMBED_JUCE_BUILD_TESTS)
         endif()
     endfunction()
 
-    # P0.2 — an unbound design control keeps its imported default (the -1.0
+    # An unbound design control keeps its imported default (the -1.0
     # get_param sentinel), rather than snapping to 0.
     pulp_embed_juce_add_console_test(pulp-embed-juce-unbound-default-test
         examples/unbound-default-test/main.cpp)
     add_test(NAME unbound-default-test COMMAND pulp-embed-juce-unbound-default-test)
 
-    # P0.3 — the ctor does not force the design size; the owning editor drives
+    # The ctor does not force the design size; the owning editor drives
     # size on open (kills the reopen-while-zoomed double-render).
     pulp_embed_juce_add_console_test(pulp-embed-juce-size-on-open-test
         examples/size-on-open-test/main.cpp)
     add_test(NAME size-on-open-test COMMAND pulp-embed-juce-size-on-open-test)
 
-    # P1.4 + P2.3 — runtime host-param accessor (live cache invalidation) and the
+    # Runtime host-param accessor (live cache invalidation) and the
     # host-action channel, via the adapter seams the v8 callbacks trampoline into.
     pulp_embed_juce_add_console_test(pulp-embed-juce-host-surface-test
         examples/host-surface-test/main.cpp)
