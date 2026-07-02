@@ -21,7 +21,21 @@ if(PULP_EMBED_JUCE_BUILD_TESTS)
 endif()
 
 # ── the embedding C ABI library (separate repo) ──────────────────────────
+# Primary distribution is the Phase-D signed tarball + find_package; until a
+# consumer wires that, point -DPULP_VIEW_EMBED_DIR at a pulp-view-embed checkout.
+# Sibling-checkout fallback (matches the repo's resolve pattern): if unset, probe
+# a ../pulp-view-embed alongside this repo so a fresh clone-next-to-clone builds
+# without extra flags.
 set(PULP_VIEW_EMBED_DIR "" CACHE PATH "Path to the pulp-view-embed checkout")
+if(NOT PULP_VIEW_EMBED_DIR)
+    foreach(_cand "${CMAKE_CURRENT_SOURCE_DIR}/../pulp-view-embed")
+        if(EXISTS "${_cand}/CMakeLists.txt")
+            get_filename_component(PULP_VIEW_EMBED_DIR "${_cand}" ABSOLUTE)
+            message(STATUS "pulp-embed-juce: using sibling pulp-view-embed at ${PULP_VIEW_EMBED_DIR}")
+            break()
+        endif()
+    endforeach()
+endif()
 if(NOT PULP_VIEW_EMBED_DIR OR NOT EXISTS "${PULP_VIEW_EMBED_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "Set -DPULP_VIEW_EMBED_DIR to the pulp-view-embed checkout")
 endif()
@@ -138,6 +152,43 @@ if(PULP_EMBED_JUCE_BUILD_PLUGIN)
         juce::juce_recommended_warning_flags)
 endif()
 
+# ── canonical end-to-end example: the synthetic effect rack (P4.1) ─────────
+# A real JUCE plugin (VST3 + Standalone; AU deliberately OFF here — the console
+# tests already cover the adapter halves and AU adds the installed-SDK header
+# clash documented on PulpEmbedJucePlugin above) whose editor IS a hand-built
+# native Pulp view (SyntheticRackView) demonstrating, together: static param_key
+# binding, a runtime-accessor-bound paged rack, one host action, and
+# configureResizableEditor. Built by default so `cmake --build build` produces it.
+option(PULP_EMBED_JUCE_BUILD_SYNTHETIC_RACK "Build the canonical synthetic-rack example plugin" ON)
+if(PULP_EMBED_JUCE_BUILD_SYNTHETIC_RACK)
+    juce_add_plugin(SyntheticRackPlugin
+        PRODUCT_NAME "SyntheticRack"
+        COMPANY_NAME "Pulp"
+        BUNDLE_ID dev.pulp.embed.juce.synthrack
+        PLUGIN_MANUFACTURER_CODE Pulp
+        PLUGIN_CODE Psrk            # unique 4-char code (distinct from Pemj/Pemb)
+        FORMATS VST3 Standalone     # AU off by default (see note above)
+        VST3_CATEGORIES Fx
+        IS_SYNTH FALSE
+        NEEDS_MIDI_INPUT FALSE
+        NEEDS_MIDI_OUTPUT FALSE
+        EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+        COPY_PLUGIN_AFTER_BUILD FALSE
+        VERSION 0.1.0)
+    juce_generate_juce_header(SyntheticRackPlugin)
+    target_sources(SyntheticRackPlugin PRIVATE examples/synthetic-rack/PluginMain.cpp)
+    target_include_directories(SyntheticRackPlugin PRIVATE examples/synthetic-rack)
+    target_compile_definitions(SyntheticRackPlugin PUBLIC
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0)
+    target_link_libraries(SyntheticRackPlugin PRIVATE
+        pulp_embed_juce
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+endif()
+
 # ── headless adapter tests ────────────────────────────────────────────────
 # A console self-check of the ABI v6 string API (capture/restore round-trip).
 # Loads the FAITHFUL DesignIR fixture (text_fields live on that lane).
@@ -219,4 +270,14 @@ if(PULP_EMBED_JUCE_BUILD_TESTS)
     pulp_embed_juce_add_console_test(pulp-embed-juce-host-surface-test
         examples/host-surface-test/main.cpp)
     add_test(NAME host-surface-test COMMAND pulp-embed-juce-host-surface-test)
+
+    # P4.1 — the canonical fixture's headless self-check: the SyntheticRackView
+    # paging/re-key + host-action logic in isolation, then the embed adapter
+    # surfaces (static + paged binding, display text, action) against a real
+    # SyntheticRackProcessor. Shares the synthetic-rack example headers.
+    pulp_embed_juce_add_console_test(pulp-embed-juce-synthetic-rack-test
+        examples/synthetic-rack/headless_selfcheck.cpp)
+    target_include_directories(pulp-embed-juce-synthetic-rack-test PRIVATE
+        examples/synthetic-rack)
+    add_test(NAME synthetic-rack-test COMMAND pulp-embed-juce-synthetic-rack-test)
 endif()
