@@ -7,6 +7,13 @@ Figma frame) as a `juce::Component` inside any JUCE app or plugin.
 > Status: **experiment**. Thin wrapper over the flat C ABI — no Pulp C++ types
 > cross into JUCE translation units (only `pulp_view_embed.h`).
 
+**Porting a JUCE plugin UI?** Start with the walkthrough:
+[`docs/porting-a-juce-plugin-ui.md`](docs/porting-a-juce-plugin-ui.md) (decision
+tree + 5-step recipe + Debug/Release trap + troubleshooting), and the canonical
+end-to-end example [`examples/synthetic-rack/`](examples/synthetic-rack/README.md)
+(static + paged param binding, a host action, `configureResizableEditor`, and a
+headless self-check, in one small plugin).
+
 ## Status / what works / known limitations / roadmap
 
 **What works (macOS):**
