@@ -36,10 +36,14 @@ struct PulpEmbedComponent::HostBridge : private juce::AudioProcessorListener {
     std::vector<std::pair<std::string, juce::AudioProcessorParameter*>> bound;
     std::vector<float> lastPushed;  // last value pushed UI<-host, per bound entry
 
-    juce::AudioProcessorParameter* find(const char* key) {
-        const auto it = byKey.find(key);
-        return it == byKey.end() ? nullptr : it->second;
-    }
+    // Resolve UI->host writes against the LIVE all-parameters map (findAny),
+    // NOT the static create-time byKey snapshot. Closeout-review MUST-FIX: a
+    // paged/dynamic control re-keyed after create (e.g. "slot1.gain") answered
+    // has_param=true and rendered display text (metadata used findAny) but its
+    // set_param/gesture writes went through byKey, missed, and silently never
+    // reached the host. byKey is a subset of allById (both keyed by paramID),
+    // so this only ever resolves MORE keys, never fewer.
+    juce::AudioProcessorParameter* find(const char* key) { return findAny(key); }
 
     // ── flat-C host callbacks (UI -> host). ctx == this. ────────────────────
     static void setParam(void* ctx, const char* key, double normalized) {
@@ -397,6 +401,28 @@ juce::String PulpEmbedComponent::hostParamDisplayText(const juce::String& key,
     std::string out;
     if (!bridge_->displayText(key.toRawUTF8(), normalized, out)) return {};
     return juce::String::fromUTF8(out.c_str());
+}
+
+bool PulpEmbedComponent::hostWriteParam(const juce::String& key, double normalized) {
+    if (bridge_ == nullptr) return false;
+    auto* p = bridge_->find(key.toRawUTF8());  // live resolve (== findAny)
+    if (p == nullptr) return false;
+    p->setValueNotifyingHost((float) juce::jlimit(0.0, 1.0, normalized));
+    return true;
+}
+bool PulpEmbedComponent::hostBeginGesture(const juce::String& key) {
+    if (bridge_ == nullptr) return false;
+    auto* p = bridge_->find(key.toRawUTF8());
+    if (p == nullptr) return false;
+    p->beginChangeGesture();
+    return true;
+}
+bool PulpEmbedComponent::hostEndGesture(const juce::String& key) {
+    if (bridge_ == nullptr) return false;
+    auto* p = bridge_->find(key.toRawUTF8());
+    if (p == nullptr) return false;
+    p->endChangeGesture();
+    return true;
 }
 
 // ── host action/command channel (ABI v8 adapter half, P2.3) ──────────────────

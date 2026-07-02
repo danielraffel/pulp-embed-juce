@@ -91,6 +91,16 @@ public:
     // never per frame).
     juce::String hostParamDisplayText(const juce::String& key, double normalized) const;
 
+    // UI->host write seams (the single source of truth the v8 set_param /
+    // begin_gesture / end_gesture callbacks trampoline into). They resolve keys
+    // against the SAME live parameter map as hostHasParam, so a paged/dynamic
+    // control re-keyed after create writes correctly (closeout-review M1: the
+    // write path previously used a stale create-time snapshot and silently
+    // dropped paged writes). Return true iff `key` resolved to a host parameter.
+    bool hostWriteParam(const juce::String& key, double normalized);
+    bool hostBeginGesture(const juce::String& key);
+    bool hostEndGesture(const juce::String& key);
+
     // ── host action/command channel (ABI v8 adapter half) ───────────────────
     // Opaque command + JSON args from the embedded view (a view calls the SDK
     // host-action surface, which the v8 host_action callback bridges here). The

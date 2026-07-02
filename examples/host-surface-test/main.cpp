@@ -18,6 +18,7 @@
 
 #include <pulp/view/design_frame_view.hpp>
 
+#include <cmath>
 #include <cstdio>
 #include <memory>
 
@@ -110,6 +111,19 @@ int main() {
           "hostHasParam resolves a live-added parameter (cache invalidated)");
     check(comp.hostParamDisplayText("rack.slot0.mix", 1.0).isNotEmpty(),
           "hostParamDisplayText resolves a live-added parameter");
+
+    // ── M1 regression: the UI->host WRITE path is as live as has_param ───────
+    // A paged/dynamic control re-keyed to a late-added parameter must actually
+    // drive the host, not just report has_param=true. Before the fix, the write
+    // path used a stale create-time snapshot and silently dropped these.
+    check(comp.hostWriteParam("rack.slot0.mix", 0.8f),
+          "hostWriteParam resolves a live-added (paged) key");
+    check(std::abs(proc.getParameters()[1]->getValue() - 0.8f) < 1e-4f,
+          "the live-added host parameter actually moved to the written value");
+    check(comp.hostBeginGesture("rack.slot0.mix") && comp.hostEndGesture("rack.slot0.mix"),
+          "begin/end gesture resolve for a live-added key (balanced undo group)");
+    check(!comp.hostWriteParam("does.not.exist", 0.5f),
+          "hostWriteParam returns false for an unknown key (no host write)");
 
     // ── P2.3: host-action channel ────────────────────────────────────────────
     juce::String gotAction;
