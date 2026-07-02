@@ -56,7 +56,7 @@ headless self-check, in one small plugin).
   its `AudioProcessorParameter`s — a dragged knob writes the host param
   (begin/set/end gesture); host automation / preset recall pushes values back
   into the control (polled on the 30 Hz tick). The bind key is the **control's
-  widget id == the JUCE parameter ID** (e.g. APVTS `ParameterID`); unmatched
+  `param_key` == the JUCE parameter ID** (e.g. APVTS `ParameterID`); unmatched
   controls stay visual-only. `boundParameterCount()` reports how many resolved.
   (Before this, the C ABI exposed the bridge but the JUCE wrapper never wired
   it, so embedded knobs were visual-only.) The example plugin demonstrates it
@@ -167,7 +167,7 @@ auto* ui = new pulp_juce::PulpEmbedComponent(
 setContentOwned(ui, true);   // add to a window / editor like any Component
 
 // Interactive — bind the design's controls to your processor's parameters.
-// Control widget id == JUCE parameter ID; bidirectional (UI gesture -> param,
+// Control param_key == JUCE parameter ID; bidirectional (UI gesture -> param,
 // automation -> UI). `processor` must outlive the component.
 auto* ui = new pulp_juce::PulpEmbedComponent(
     juce::File("design.ir.json"), 1000, 600, processor /* juce::AudioProcessor& */);
@@ -201,7 +201,7 @@ them by hand and uses `designParams()` (instance, post-create) as a cross-check.
 
 ### Dynamic controls — runtime host-param accessor & host actions
 
-Static binding (control key == parameter ID, resolved once at create) covers
+Static binding (control `param_key` == parameter ID, resolved once at create) covers
 knobs/faders that exist for the plugin's whole life. **Dynamic / paged UIs**
 (effect racks, tab groups, controls whose parameter appears only after a slot is
 populated) need two more surfaces, both backed by the adapter and bridged over
