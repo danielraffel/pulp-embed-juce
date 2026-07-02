@@ -44,7 +44,7 @@ Figma frame) as a `juce::Component` inside any JUCE app or plugin.
 - Real-DAW load (Logic/REAPER/…) is a remaining manual validation step; CI
   covers build + headless render + pluginval-style editor lifecycle.
 
-**Resolved design questions** (from the foreign-host-embedding plan):
+**Resolved design questions** for foreign-host embedding:
 
 - *Event-loop tick* — borrowed from the host: a `juce::Timer` (and the
   display-link inside Pulp's GPU host) drives `pulp_embed_tick`; the adapter
@@ -56,6 +56,19 @@ Figma frame) as a `juce::Component` inside any JUCE app or plugin.
 **Roadmap:** Windows `HWNDComponent` host; `pulp add`-style packaged
 distribution; zero-copy GPU compositing (currently CPU RGBA readback for the
 offscreen path).
+
+## Performance — measure in Release
+
+**A Debug build of the Skia/Dawn render stack runs roughly ~3x the CPU of
+Release** (no `-O3`/`NDEBUG`, live asserts, no inlining of Skia/Dawn/Yoga). A
+"the embedded editor feels slow" observation in a Debug build is almost always
+the build type, not the code — **always measure in Release before judging embed
+performance.** A Debug-built adapter emits one runtime log line to that effect on
+first attach (`[pulp-embed] built Debug — expect ~3x CPU; measure Release`).
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release   # ← the CPU number that matters
+```
 
 ## What gets embedded (FAQ)
 
@@ -153,6 +166,63 @@ for (auto& p : pulp_juce::PulpEmbedComponent::readDesignParams(
 
 The host still owns the params (authoritative); an existing plugin keeps declaring
 them by hand and uses `designParams()` (instance, post-create) as a cross-check.
+
+### Dynamic controls — runtime host-param accessor & host actions
+
+Static binding (control key == parameter ID, resolved once at create) covers
+knobs/faders that exist for the plugin's whole life. **Dynamic / paged UIs**
+(effect racks, tab groups, controls whose parameter appears only after a slot is
+populated) need two more surfaces, both backed by the adapter and bridged over
+the ABI (v8) when the runtime library supports it:
+
+```cpp
+// Runtime param accessor — LIVE membership + display text. Tracks parameters
+// added/removed after construction (rebuilt on the processor's
+// audioProcessorChanged), so a late-bound rack-slot key resolves without a
+// remount. Display text comes from AudioProcessorParameter::getText, memoized
+// per (key, value); unresolved keys are logged once, never per frame.
+if (embed->hostHasParam("rack.slot0.mix"))
+    label = embed->hostParamDisplayText("rack.slot0.mix", 0.5);  // e.g. "50 %"
+
+// Host action/command channel — opaque command + JSON args from the view.
+// Return true if handled (diagnostic only; unhandled actions are logged, not
+// fatal). Example: insert/remove/reorder rack slots, load a preset.
+embed->onHostAction = [&](const juce::String& action, const juce::var& args) {
+    if (action == "load_preset") { loadPreset((int) args["index"]); return true; }
+    return false;
+};
+```
+
+When constructed against a pre-v8 runtime library the adapter negotiates the ABI
+version down (`min(header, pulp_embed_abi_version())`) and these dynamic
+features stay dormant; the `-1.0` unknown-key `get_param` sentinel keeps unbound
+controls at their imported defaults regardless.
+
+### Resizable editor (one call)
+
+`configureResizableEditor()` reads the design's `pulp_embed_size_hints`, calls
+`setResizable(true, false)`, installs a `juce::ComponentBoundsConstrainer` locked
+to the design's aspect ratio with min/max from the hints, and sizes the editor
+to the design's preferred size on open:
+
+```cpp
+// in your AudioProcessorEditor ctor, after adding the embed:
+embed_->configureResizableEditor(*this);
+```
+
+Resizing is **host-window-driven** — the heavyweight embed NSView covers JUCE's
+lightweight corner grip, so `useBottomRightCornerResizer` is false and you drag
+the window edge / the host's plugin-window chrome. The embed letterboxes content
+to the design viewport itself, so this only constrains the host window (no
+transform is re-derived adapter-side).
+
+### Standalone (chrome-free) support files
+
+For a design-first standalone (native title bar, native full-screen, no JUCE
+tool-bar chrome), see [`support/`](support/README.md):
+`PulpStandaloneApp.cpp` + `ScalableEditorHost.h`, wired via
+`JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP`. That doc also records a `nextDrawable`
+standalone crash (settings-tab + audio-input) to file against `pulp-view-embed`.
 
 `PulpEmbedComponent` uses **host-parents mode**: it takes Pulp's child native
 view via `pulp_embed_native_handle`, parents it through `juce::NSViewComponent`,

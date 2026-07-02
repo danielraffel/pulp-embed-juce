@@ -3,11 +3,14 @@
 #include <pulp_view_embed.hpp>  // pulp::embed::param_descs / read_design_params (shared loop)
 #include <juce_audio_processors/juce_audio_processors.h>  // bind to a real processor
 
+#include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -17,18 +20,30 @@ namespace pulp_juce {
 // parameters and trampolines the flat-C host callbacks into JUCE calls.
 // host_ctx (PulpEmbedDesc.host_ctx) is a pointer to one of these. Lives as long
 // as the component; the view is torn down before it (see ~PulpEmbedComponent).
-struct PulpEmbedComponent::HostBridge {
-    explicit HostBridge(juce::AudioProcessor& p) : proc(p) {}
+struct PulpEmbedComponent::HostBridge : private juce::AudioProcessorListener {
+    explicit HostBridge(juce::AudioProcessor& p) : proc(p) {
+        // Track live parameter-tree changes so the runtime accessor (v8
+        // has_param / display-text) stays correct when a host swaps parameter
+        // groups (paged racks, dynamic slots). audioProcessorChanged sets the
+        // dirty flag; the map rebuilds lazily on the next UI-thread query.
+        proc.addListener(this);
+    }
+    ~HostBridge() override { proc.removeListener(this); }
 
     juce::AudioProcessor& proc;
+    PulpEmbedComponent*   owner = nullptr;  // for the host-action channel
     std::unordered_map<std::string, juce::AudioProcessorParameter*> byKey;
     std::vector<std::pair<std::string, juce::AudioProcessorParameter*>> bound;
     std::vector<float> lastPushed;  // last value pushed UI<-host, per bound entry
 
-    juce::AudioProcessorParameter* find(const char* key) {
-        const auto it = byKey.find(key);
-        return it == byKey.end() ? nullptr : it->second;
-    }
+    // Resolve UI->host writes against the LIVE all-parameters map (findAny),
+    // NOT the static create-time byKey snapshot. Previously a
+    // paged/dynamic control re-keyed after create (e.g. "slot1.gain") answered
+    // has_param=true and rendered display text (metadata used findAny) but its
+    // set_param/gesture writes went through byKey, missed, and silently never
+    // reached the host. byKey is a subset of allById (both keyed by paramID),
+    // so this only ever resolves MORE keys, never fewer.
+    juce::AudioProcessorParameter* find(const char* key) { return findAny(key); }
 
     // ── flat-C host callbacks (UI -> host). ctx == this. ────────────────────
     static void setParam(void* ctx, const char* key, double normalized) {
@@ -37,7 +52,11 @@ struct PulpEmbedComponent::HostBridge {
     }
     static double getParam(void* ctx, const char* key) {
         if (auto* p = static_cast<HostBridge*>(ctx)->find(key)) return p->getValue();
-        return 0.0;
+        // Unknown key: -1.0 sentinel (matches the iPlug2 adapter). The shim
+        // treats any [0,1] return as authoritative, so returning 0.0 here forced
+        // every UNBOUND imported control to 0 instead of keeping its imported
+        // default. An out-of-range value tells the shim "no host opinion".
+        return -1.0;
     }
     static void beginGesture(void* ctx, const char* key) {
         if (auto* p = static_cast<HostBridge*>(ctx)->find(key)) p->beginChangeGesture();
@@ -45,6 +64,85 @@ struct PulpEmbedComponent::HostBridge {
     static void endGesture(void* ctx, const char* key) {
         if (auto* p = static_cast<HostBridge*>(ctx)->find(key)) p->endChangeGesture();
     }
+
+    // ── runtime host-param accessor backing (ABI v8 adapter half) ────────────
+    // A paramID-keyed view of ALL the processor's parameters (not just the ones
+    // a design control bound to at create). Rebuilt lazily when the processor's
+    // parameter tree changes, so dynamic/paged controls resolve late-added keys.
+    std::atomic<bool> allDirty{true};
+    std::unordered_map<std::string, juce::AudioProcessorParameter*> allById;
+    // Display-text memo keyed by (paramID, exact normalized bits) so repeated
+    // per-tick queries never re-run a plugin's getText override.
+    std::unordered_map<std::string, std::string> displayCache;
+    std::unordered_set<std::string> loggedMisses;  // unresolved keys logged once
+
+    void rebuildAllIfDirty() {
+        if (!allDirty.exchange(false)) return;
+        allById.clear();
+        displayCache.clear();  // stale once the parameter set changes
+        for (auto* p : proc.getParameters())
+            if (auto* wid = dynamic_cast<juce::AudioProcessorParameterWithID*>(p))
+                allById[wid->paramID.toStdString()] = p;
+    }
+    juce::AudioProcessorParameter* findAny(const char* key) {
+        rebuildAllIfDirty();
+        const auto it = allById.find(key ? key : "");
+        return it == allById.end() ? nullptr : it->second;
+    }
+    void logMissOnce(const char* key) {
+        const std::string k = key ? key : "";
+        if (loggedMisses.insert(k).second)
+            juce::Logger::writeToLog("[pulp-embed] host-param key unresolved: " +
+                                     juce::String::fromUTF8(k.c_str()));
+    }
+    // Formatted display text for `key` at `normalized`, memoized per (key,value).
+    // Returns false when the key is unknown (and logs the miss once).
+    bool displayText(const char* key, double normalized, std::string& out) {
+        auto* p = findAny(key);
+        if (p == nullptr) { logMissOnce(key); return false; }
+        const double v = juce::jlimit(0.0, 1.0, normalized);
+        uint64_t bits = 0;
+        std::memcpy(&bits, &v, sizeof bits);  // exact (key, value) memo key
+        std::string cacheKey(key ? key : "");
+        cacheKey.push_back('\x1f');
+        cacheKey.append(reinterpret_cast<const char*>(&bits), sizeof bits);
+        const auto it = displayCache.find(cacheKey);
+        if (it != displayCache.end()) { out = it->second; return true; }
+        out = p->getText((float) v, 0).toStdString();
+        displayCache.emplace(std::move(cacheKey), out);
+        return true;
+    }
+
+    // ── v8 flat-C host callbacks (host_ctx == this). Trampoline into the
+    //    backing above / the owning component's onHostAction. ────────────────
+    static int hasParam(void* ctx, const char* key) {
+        return static_cast<HostBridge*>(ctx)->findAny(key) != nullptr ? 1 : 0;
+    }
+    static size_t paramDisplayText(void* ctx, const char* key, double normalized,
+                                   char* buf, size_t cap) {
+        std::string s;
+        if (!static_cast<HostBridge*>(ctx)->displayText(key, normalized, s)) return 0;
+        const size_t n = s.size();
+        if (buf != nullptr && cap > 0) {
+            const size_t c = n < cap - 1 ? n : cap - 1;
+            std::memcpy(buf, s.data(), c);
+            buf[c] = '\0';
+        }
+        return n;
+    }
+    static int hostAction(void* ctx, const char* action, const char* args_json) {
+        auto* b = static_cast<HostBridge*>(ctx);
+        if (b->owner == nullptr) return 0;
+        return b->owner->dispatchHostAction(juce::String::fromUTF8(action ? action : ""),
+                                            juce::String::fromUTF8(args_json ? args_json : ""))
+                   ? 1 : 0;
+    }
+
+    // juce::AudioProcessorListener — only the tree-shape change matters here.
+    void audioProcessorChanged(juce::AudioProcessor*, const ChangeDetails&) override {
+        allDirty.store(true);
+    }
+    void audioProcessorParameterChanged(juce::AudioProcessor*, int, float) override {}
 
     // ── ABI v6 text-field string bridge (text_field <-> plugin STATE) ────────
     // text_fields carry a string (preset name / label / search), not a
@@ -85,6 +183,7 @@ PulpEmbedComponent::PulpEmbedComponent(const juce::File& source,
                                        int logicalWidth, int logicalHeight,
                                        juce::AudioProcessor& processor)
     : bridge_(std::make_unique<HostBridge>(processor)) {
+    bridge_->owner = this;  // host-action channel routes back to onHostAction
     createView(source, logicalWidth, logicalHeight);
 }
 
@@ -97,13 +196,20 @@ PulpEmbedComponent::PulpEmbedComponent(pulp::embed::NativeViewFactory factory,
                                        int logicalWidth, int logicalHeight,
                                        juce::AudioProcessor& processor)
     : bridge_(std::make_unique<HostBridge>(processor)) {
+    bridge_->owner = this;  // host-action channel routes back to onHostAction
     createViewFromFactory(std::move(factory), logicalWidth, logicalHeight);
 }
 
 PulpEmbedDesc PulpEmbedComponent::buildDesc(int logicalWidth, int logicalHeight) const {
     PulpEmbedDesc desc{};
     desc.struct_size = sizeof(PulpEmbedDesc);
-    desc.abi_version = PULP_VIEW_EMBED_ABI_VERSION;
+    // Clamp to what the RUNTIME library supports (statically-linked shim today,
+    // but a future prebuilt dylib may predate these headers). check_desc rejects
+    // abi_version > library version, so a header-newer-than-library skew must
+    // negotiate DOWN — the shim's struct_size/offset clamp then simply ignores
+    // callbacks the older library doesn't know about.
+    desc.abi_version = static_cast<uint32_t>(
+        juce::jmin<uint32_t>(PULP_VIEW_EMBED_ABI_VERSION, pulp_embed_abi_version()));
     desc.logical_width = logicalWidth;
     desc.logical_height = logicalHeight;
     desc.scale_factor = 1.0f;
@@ -123,14 +229,41 @@ PulpEmbedDesc PulpEmbedComponent::buildDesc(int logicalWidth, int logicalHeight)
         // ABI v6 string side-channel (text_field <-> plugin state), same host_ctx.
         desc.host.set_string = &HostBridge::setString;
         desc.host.get_string = &HostBridge::getString;
+       #if PULP_VIEW_EMBED_ABI_VERSION >= 8
+        // ABI v8 tail-append: runtime host-param accessor + action channel.
+        // Gated on the header version so the adapter still compiles against a
+        // pre-v8 pulp_view_embed.h (the struct lacks these members there). The
+        // trampolines above are unconditional and unit-tested via the
+        // hostHasParam / hostParamDisplayText / dispatchHostAction seams, so the
+        // backing is exercised even before the v8 ABI lands in the sibling repo.
+        desc.host.has_param = &HostBridge::hasParam;
+        desc.host.param_display_text = &HostBridge::paramDisplayText;
+        desc.host.host_action = &HostBridge::hostAction;
+       #endif
     }
     return desc;
+}
+
+// A Debug build of the Skia/Dawn render stack runs roughly ~3x the CPU
+// of Release (no -O3/NDEBUG, live asserts, no inlining). A UX-perceived "the
+// embed is slow" regression in a Debug build is almost always the build type,
+// not the code. Emit one loud line so anyone measuring in Debug knows to
+// re-measure in Release. Once per process; compiled out entirely in Release.
+static void logDebugCpuNoticeOnce() {
+   #if JUCE_DEBUG
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true))
+        juce::Logger::writeToLog(
+            "[pulp-embed] built Debug — expect ~3x CPU; measure Release before "
+            "judging embed performance.");
+   #endif
 }
 
 // Shared post-create steps for every create path: attach Pulp's child view to
 // the JUCE component (macOS), resolve the host-param bindings, and start the
 // 30 Hz tick. Call only after view_ is non-null.
 void PulpEmbedComponent::attachAndStart() {
+    logDebugCpuNoticeOnce();
    #if JUCE_MAC
     // Host-parents mode: JUCE owns parenting/retain/resize of Pulp's child view.
     addAndMakeVisible(nsView_);
@@ -149,7 +282,13 @@ void PulpEmbedComponent::attachAndStart() {
 
 void PulpEmbedComponent::createView(const juce::File& source,
                                     int logicalWidth, int logicalHeight) {
-    setSize(logicalWidth, logicalHeight);
+    // Do NOT force the design size here. Retain it (design viewport pin
+    // + configureResizableEditor fallback), but leave the component 0x0 until
+    // the owning editor drives a real size; the first non-zero resized() issues
+    // the first pulp_embed_resize. Forcing the design size in the ctor and then
+    // letting the editor set a (possibly zoomed) size double-rendered on reopen.
+    logicalWidth_ = logicalWidth;
+    logicalHeight_ = logicalHeight;
 
     PulpEmbedDesc desc = buildDesc(logicalWidth, logicalHeight);
 
@@ -180,7 +319,10 @@ void PulpEmbedComponent::createView(const juce::File& source,
 
 void PulpEmbedComponent::createViewFromFactory(pulp::embed::NativeViewFactory factory,
                                                int logicalWidth, int logicalHeight) {
-    setSize(logicalWidth, logicalHeight);
+    // See createView: retain the design size, don't force it as the
+    // component size. The owning editor drives size on open.
+    logicalWidth_ = logicalWidth;
+    logicalHeight_ = logicalHeight;
 
     PulpEmbedDesc desc = buildDesc(logicalWidth, logicalHeight);
 
@@ -245,6 +387,89 @@ void PulpEmbedComponent::pumpHostToUi() {
 
 int PulpEmbedComponent::boundParameterCount() const noexcept {
     return bridge_ != nullptr ? static_cast<int>(bridge_->bound.size()) : 0;
+}
+
+// ── runtime host-param accessor (ABI v8 adapter half) ────────────────────────
+
+bool PulpEmbedComponent::hostHasParam(const juce::String& key) const {
+    return bridge_ != nullptr && bridge_->findAny(key.toRawUTF8()) != nullptr;
+}
+
+juce::String PulpEmbedComponent::hostParamDisplayText(const juce::String& key,
+                                                      double normalized) const {
+    if (bridge_ == nullptr) return {};
+    std::string out;
+    if (!bridge_->displayText(key.toRawUTF8(), normalized, out)) return {};
+    return juce::String::fromUTF8(out.c_str());
+}
+
+bool PulpEmbedComponent::hostWriteParam(const juce::String& key, double normalized) {
+    if (bridge_ == nullptr) return false;
+    auto* p = bridge_->find(key.toRawUTF8());  // live resolve (== findAny)
+    if (p == nullptr) return false;
+    p->setValueNotifyingHost((float) juce::jlimit(0.0, 1.0, normalized));
+    return true;
+}
+bool PulpEmbedComponent::hostBeginGesture(const juce::String& key) {
+    if (bridge_ == nullptr) return false;
+    auto* p = bridge_->find(key.toRawUTF8());
+    if (p == nullptr) return false;
+    p->beginChangeGesture();
+    return true;
+}
+bool PulpEmbedComponent::hostEndGesture(const juce::String& key) {
+    if (bridge_ == nullptr) return false;
+    auto* p = bridge_->find(key.toRawUTF8());
+    if (p == nullptr) return false;
+    p->endChangeGesture();
+    return true;
+}
+
+// ── host action/command channel (ABI v8 adapter half) ────────────────────────
+
+bool PulpEmbedComponent::dispatchHostAction(const juce::String& action,
+                                            const juce::String& argsJson) {
+    if (!onHostAction) return false;
+    // Parse the args to a juce::var (null var when empty / malformed — the
+    // handler still fires so a no-arg action works).
+    juce::var args;
+    if (argsJson.isNotEmpty()) {
+        const auto parsed = juce::JSON::parse(argsJson);
+        if (!parsed.isVoid()) args = parsed;
+    }
+    return onHostAction(action, args);
+}
+
+// ── resizable editor helper ──────────────────────────────────────────────────
+
+void PulpEmbedComponent::configureResizableEditor(juce::AudioProcessorEditor& editor) {
+    if (view_ == nullptr) return;
+
+    PulpEmbedSizeHints hints{};
+    if (pulp_embed_size_hints(view_, &hints) != PULP_EMBED_OK) return;
+    if (!hints.resizable) return;  // design opts out — leave the editor fixed
+
+    // Host-window resize only: the heavyweight embed NSView covers JUCE's
+    // lightweight corner grip, so useBottomRightCornerResizer is false. The
+    // embed letterboxes content to the design viewport itself — we only
+    // constrain the host window here (no transform re-derivation).
+    editor.setResizable(true, /*useBottomRightCornerResizer*/ false);
+
+    constrainer_ = std::make_unique<juce::ComponentBoundsConstrainer>();
+    const int prefW = hints.preferred_width  > 0 ? hints.preferred_width  : logicalWidth_;
+    const int prefH = hints.preferred_height > 0 ? hints.preferred_height : logicalHeight_;
+    const int minW = hints.min_width  > 0 ? hints.min_width  : prefW;
+    const int minH = hints.min_height > 0 ? hints.min_height : prefH;
+    // 0 = unbounded in the hints; JUCE wants a concrete cap, so use a large one.
+    const int maxW = hints.max_width  > 0 ? hints.max_width  : 32768;
+    const int maxH = hints.max_height > 0 ? hints.max_height : 32768;
+    constrainer_->setSizeLimits(minW, minH, maxW, maxH);
+    if (hints.aspect_ratio > 0.0f)
+        constrainer_->setFixedAspectRatio((double) hints.aspect_ratio);
+    editor.setConstrainer(constrainer_.get());
+
+    // Size-on-open: the design's preferred size (the constrainer keeps it legal).
+    editor.setSize(prefW, prefH);
 }
 
 // ── text-field string state (ABI v6) ────────────────────────────────────────
@@ -314,6 +539,12 @@ std::vector<PulpEmbedComponent::DesignParamDesc> PulpEmbedComponent::designParam
     std::vector<DesignParamDesc> out;
     for (const auto& p : pulp::embed::param_descs(view_)) out.push_back(toJuce(p));
     return out;
+}
+
+double PulpEmbedComponent::controlValue(int index) const {
+    if (view_ == nullptr || index < 0 || index >= pulp_embed_param_count(view_))
+        return -1.0;
+    return pulp_embed_param_value(view_, index);
 }
 
 std::vector<PulpEmbedComponent::DesignParamDesc>
@@ -401,6 +632,9 @@ bool PulpEmbedComponent::writeRenderPng(const juce::File& out, int width, int he
 
 void PulpEmbedComponent::resized() {
     if (view_ == nullptr) return;
+    // Ignore zero-size layout passes; the first NON-ZERO resized() is the
+    // first pulp_embed_resize (the ctor no longer forces the design size).
+    if (getWidth() <= 0 || getHeight() <= 0) return;
    #if JUCE_MAC
     nsView_.setBounds(getLocalBounds());
    #endif
@@ -468,6 +702,27 @@ void PulpEmbedComponent::mouseEnter(const juce::MouseEvent& e) {
 void PulpEmbedComponent::mouseExit(const juce::MouseEvent&) {
     if (view_ == nullptr) return;
     pulp_embed_dispatch_mouse_exit(view_);
+}
+
+void PulpEmbedComponent::mouseDown(const juce::MouseEvent& e) {
+    if (view_ == nullptr) return;
+    pulp_embed_dispatch_mouse_down(view_,
+                                   static_cast<double>(e.position.x),
+                                   static_cast<double>(e.position.y));
+}
+
+void PulpEmbedComponent::mouseDrag(const juce::MouseEvent& e) {
+    if (view_ == nullptr) return;
+    pulp_embed_dispatch_mouse_drag(view_,
+                                   static_cast<double>(e.position.x),
+                                   static_cast<double>(e.position.y));
+}
+
+void PulpEmbedComponent::mouseUp(const juce::MouseEvent& e) {
+    if (view_ == nullptr) return;
+    pulp_embed_dispatch_mouse_up(view_,
+                                 static_cast<double>(e.position.x),
+                                 static_cast<double>(e.position.y));
 }
 
 }  // namespace pulp_juce

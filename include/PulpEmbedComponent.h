@@ -16,7 +16,10 @@
 #include <memory>
 #include <vector>
 
-namespace juce { class AudioProcessor; }  // fwd — full type only needed in the .cpp
+namespace juce {
+class AudioProcessor;        // fwd — full type only needed in the .cpp
+class AudioProcessorEditor;  // fwd — configureResizableEditor takes a reference
+}  // namespace juce
 
 namespace pulp_juce {
 
@@ -64,6 +67,75 @@ public:
     // parameter ID). Handy for self-checks / "is the bridge live?".
     int boundParameterCount() const noexcept;
 
+    // ── runtime host-param accessor (ABI v8 adapter half) ───────────────────
+    // Back the v8 host callbacks (has_param / param_display_text) with a
+    // paramID-keyed view of the processor's parameters that is LIVE — it tracks
+    // parameters added/removed after construction (rebuilt on the processor's
+    // audioProcessorChanged). This is what dynamic/paged UIs (effect racks,
+    // tab groups) need: a control whose key resolves only after a rack slot is
+    // populated can ask "does this key exist yet?" and "what's the display text
+    // for this normalized value?" without a remount. Both are no-ops (false /
+    // empty) when constructed without a processor.
+
+    // Live membership test: true iff `key` currently resolves to a host
+    // parameter (== the JUCE parameter ID). Reflects late-added parameters.
+    // This is the single source of truth the v8 has_param callback trampolines
+    // into; the -1.0 get_param sentinel stays only as belt-and-braces
+    // for pre-v8 runtime libraries.
+    bool hostHasParam(const juce::String& key) const;
+
+    // Formatted display text for `key` at `normalized` [0,1] — e.g. "500 ms",
+    // "-6.0 dB" — via juce::AudioProcessorParameter::getText. Memoized per
+    // (key, normalized) pair so repeated per-tick queries don't re-run a
+    // plugin's getText override. Empty when the key is unknown (logged once,
+    // never per frame).
+    juce::String hostParamDisplayText(const juce::String& key, double normalized) const;
+
+    // UI->host write seams (the single source of truth the v8 set_param /
+    // begin_gesture / end_gesture callbacks trampoline into). They resolve keys
+    // against the SAME live parameter map as hostHasParam, so a paged/dynamic
+    // control re-keyed after create writes correctly (previously the write
+    // path used a stale create-time snapshot and silently dropped paged
+    // writes). Return true iff `key` resolved to a host parameter.
+    bool hostWriteParam(const juce::String& key, double normalized);
+    bool hostBeginGesture(const juce::String& key);
+    bool hostEndGesture(const juce::String& key);
+
+    // ── host action/command channel (ABI v8 adapter half) ───────────────────
+    // Opaque command + JSON args from the embedded view (a view calls the SDK
+    // host-action surface, which the v8 host_action callback bridges here). The
+    // adapter parses args_json to a juce::var and invokes this. Return true if
+    // the plugin handled it (diagnostic only — never control flow; unhandled
+    // actions are logged, not fatal). Example uses: insert / remove / reorder
+    // rack slots, load a preset. Set it on the owning editor; unset = every
+    // action is an unhandled no-op. Fires only when constructed with a processor.
+    std::function<bool(const juce::String& action, const juce::var& args)> onHostAction;
+
+    // Invoke the host-action channel exactly as the v8 callback would: parse
+    // `argsJson` to a juce::var and call onHostAction. Returns the handler's
+    // result (false when no handler is set). The ABI callback trampolines into
+    // this, and tests drive it directly (the channel is exercisable without the
+    // v8 runtime present).
+    bool dispatchHostAction(const juce::String& action, const juce::String& argsJson);
+
+    // ── resizable editor helper ──────────────────────────────────────────────
+    // Configure the OWNING AudioProcessorEditor for host-window resizing that
+    // matches the imported design: reads pulp_embed_size_hints (ABI v7), calls
+    // setResizable(true, false), installs a juce::ComponentBoundsConstrainer
+    // pinned to the design's aspect ratio with min/max bounds from the hints,
+    // and sizes the editor to the design's preferred size on open. The embed
+    // already letterboxes content to the design viewport internally
+    // (compute_design_viewport_transform), so this does NOT re-derive any
+    // transform — it only constrains the host window.
+    //
+    // NOTE: the heavyweight embed NSView covers JUCE's lightweight corner grip,
+    // so the grip can't drive resize — resizing is host-window-driven (drag the
+    // window edge / the host's plugin-window chrome). Call once after the embed
+    // is added to the editor. No-op when the design is non-resizable or hints
+    // are unavailable. The installed constrainer lives as long as this component,
+    // so it must outlive the editor's resize interactions.
+    void configureResizableEditor(juce::AudioProcessorEditor& editor);
+
     // One design control's parameter description (ABI v5 metadata), for a
     // GREENFIELD plugin that wants to BUILD its APVTS parameters from the design.
     // `key` is the design control key (== the JUCE parameter ID to bind to);
@@ -84,6 +156,13 @@ public:
     // from the live view. A greenfield processor more typically wants them BEFORE
     // the editor exists — use the static readDesignParams() for that.
     std::vector<DesignParamDesc> designParams() const;
+
+    // Current normalized [0,1] value of the design control at ABI `index`
+    // (== the designParams() / pulp_embed_param_* ordering). -1.0 if out of range
+    // or no view. Reads the LIVE view, so it reflects the value after the
+    // host<->UI initial sync — used to verify that an UNBOUND control kept its
+    // imported default instead of snapping to 0.
+    double controlValue(int index) const;
 
     // Static greenfield entry point: read a design's parameter descriptors WITHOUT
     // an editor/window (offscreen), so a processor can build its
@@ -165,6 +244,12 @@ public:
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseEnter(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent& e) override;
+    // Press/drag/release forwarding — without these the foreign-host embed never
+    // delivers a button gesture to Pulp, so embedded knobs/faders can't be
+    // dragged. Routes to pulp_embed_dispatch_mouse_down/drag/up.
+    void mouseDown(const juce::MouseEvent& e) override;
+    void mouseDrag(const juce::MouseEvent& e) override;
+    void mouseUp(const juce::MouseEvent& e) override;
 
 private:
     void timerCallback() override;
@@ -193,6 +278,18 @@ private:
    #endif
     PulpEmbedView* view_ = nullptr;
     bool opened_ = false;
+
+    // The design's logical size (from the ctor). Retained so configureResizableEditor
+    // can fall back to it and so resized() can recognise the design base. The ctor
+    // deliberately does NOT force this as the component size (size-on-open):
+    // the owning editor drives size, and the first NON-ZERO resized() issues the
+    // first pulp_embed_resize — this kills the reopen-while-zoomed double-render.
+    int logicalWidth_ = 0;
+    int logicalHeight_ = 0;
+
+    // Host-window resize constraint installed by configureResizableEditor;
+    // must outlive the editor's resize interactions, so it lives on the component.
+    std::unique_ptr<juce::ComponentBoundsConstrainer> constrainer_;
 
     // Dev hot-reload watcher state (bundle path only).
     bool watch_ = false;
