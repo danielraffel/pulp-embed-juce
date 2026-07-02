@@ -1,13 +1,38 @@
 # pulp-embed-juce
 
-A [JUCE](https://juce.com) adapter for
-[`pulp-view-embed`](https://github.com/danielraffel/pulp-view-embed): embed a Pulp-imported design (e.g. a
-Figma frame) as a `juce::Component` inside any JUCE app or plugin.
+The **adapter library** (`PulpEmbedComponent`) that embeds a Pulp-imported design
+(e.g. a Figma frame) as a `juce::Component` inside any JUCE app or plugin. It's a
+[JUCE](https://juce.com) wrapper over
+[`pulp-view-embed`](https://github.com/danielraffel/pulp-view-embed). Both the
+importer and the new-plugin template below depend on this adapter — **this is the
+bridge you extend or study**, not a starting point for your own plugin.
 
 > Status: **experiment**. Thin wrapper over the flat C ABI — no Pulp C++ types
 > cross into JUCE translation units (only `pulp_view_embed.h`).
 
-**Porting a JUCE plugin UI?** Start with the walkthrough:
+## Which repo do I want?
+
+Three JUCE pieces, and they are **not interchangeable**:
+
+| I want to… | Repo |
+|---|---|
+| **Import an existing JUCE plugin's UI** — automated: a Pulp UI over your *unchanged* JUCE DSP (`--emit hybrid-ui`) | [`pulp-import-juce`](https://github.com/danielraffel/pulp-import-juce) |
+| **Start a NEW plugin from scratch** with a hand-built Pulp UI — clone the GitHub template → one bound knob (it does **not** import anything) | [`pulp-embed-juce-template`](https://github.com/danielraffel/pulp-embed-juce-template) |
+| **Extend / understand the bridge** both of the above depend on | **`pulp-embed-juce` — the adapter library (this repo)** |
+
+**Most common mix-up:** the *template* does not import anything. To bring an
+existing plugin's UI across, use
+[`pulp-import-juce`](https://github.com/danielraffel/pulp-import-juce), not the
+template. Canonical map: the Pulp SDK guide
+[**Putting a Pulp UI in a JUCE plugin**](https://github.com/danielraffel/pulp/blob/main/docs/guides/juce-embed.md).
+
+> **Note on this repo's own examples.** `examples/` here (including
+> `examples/synthetic-rack/`) `add_subdirectory` the adapter — they exist to
+> **develop and test the adapter itself**, not as a consumer starter. If you want
+> a clean project to build *your* plugin on, start from
+> [`pulp-embed-juce-template`](https://github.com/danielraffel/pulp-embed-juce-template).
+
+**Porting a JUCE plugin UI by hand?** Start with the walkthrough:
 [`docs/porting-a-juce-plugin-ui.md`](docs/porting-a-juce-plugin-ui.md) (decision
 tree + 5-step recipe + Debug/Release trap + troubleshooting), and the canonical
 end-to-end example [`examples/synthetic-rack/`](examples/synthetic-rack/README.md)
