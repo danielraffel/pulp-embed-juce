@@ -234,6 +234,31 @@ PULP_EMBED_SELFCHECK=1 \
 pluginval's editor open/close test additionally exercises the editor lifecycle
 under a host. **Remaining manual step:** load in a real DAW (Logic, REAPER, …).
 
+### Gotcha: capture on the *next* message-loop callback, not the same tick
+
+A screen capture (`writeCapturePng` and friends) only records what has actually
+been rendered — the pixels from the **last completed frame**. Capturing
+synchronously in the same call stack that just changed state writes the *old*
+frame (or, before the first paint, nothing at all):
+
+```cpp
+// WRONG — no frame has rendered since the change; the PNG is stale/empty.
+processor.setValueNotifyingHost(paramIndex, 0.8f);
+writeCapturePng("after.png");          // same tick, no paint pass yet
+
+// RIGHT — let one frame render, then capture from the next callback.
+processor.setValueNotifyingHost(paramIndex, 0.8f);
+juce::Timer::callAfterDelay(32, [&] {  // one+ frame later, top of the loop
+    writeCapturePng("after.png");
+});
+```
+
+This is why the self-check renders a few live frames before it captures, and why
+a QA harness that drives real commit paths should apply state, yield to the
+message loop (a frame-gated `startTimer` / `callAfterDelay`), and capture on the
+following callback. Capturing on the same tick is the classic "my PNG is blank /
+one edit behind" trap.
+
 ## Platform
 
 macOS today (JUCE `NSViewComponent` over Pulp's NSView child). Windows is the
