@@ -369,15 +369,18 @@ timing trap) per plugin. Give it your `PulpEmbedComponent`, a list of named
 steps, an output path, and an optional reference PNG:
 
 ```cpp
-pulp_juce::PulpEmbedQaHarness qa;
-qa.run(*embed,
-       { { "load_preset routed", [&] { return embed->dispatchHostAction("load_preset", R"({"index":2})"); } } },
-       outDir.getChildFile("render.png"),
-       referenceDir.getChildFile("golden.png"),   // omit (empty File) to skip compare
-       [](const auto& r) {
-           juce::JUCEApplicationBase::getInstance()->setApplicationReturnValue(r.ok() ? 0 : 1);
-           juce::JUCEApplicationBase::quit();
-       });
+// Hold the harness as a MEMBER — run() is async (it arms a Timer and returns),
+// so a local would be destroyed before onDone fires. `qa_` outlives the run.
+pulp_juce::PulpEmbedQaHarness qa_;
+
+qa_.run(*embed,
+        { { "load_preset routed", [&] { return embed->dispatchHostAction("load_preset", R"({"index":2})"); } } },
+        outDir.getChildFile("render.png"),
+        referenceDir.getChildFile("golden.png"),   // omit (empty File) to skip compare
+        [](const auto& r) {
+            juce::JUCEApplicationBase::getInstance()->setApplicationReturnValue(r.ok() ? 0 : 1);
+            juce::JUCEApplicationBase::quit();
+        });
 ```
 
 It waits for `isOpened()`, lets a few frames render, runs each step, writes the

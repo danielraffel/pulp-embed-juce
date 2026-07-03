@@ -27,6 +27,7 @@
 #include <juce_graphics/juce_graphics.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <cstdio>
 #include <functional>
 #include <utility>
 #include <vector>
@@ -74,6 +75,13 @@ inline ImageCompareResult compareRenderToReferencePng(const juce::File& rendered
 // loop, then reports pass/fail. Mirrors the self-checks' timing exactly:
 // wait for isOpened() (bounded by settleWaits), let settleFrames render, run the
 // caller's steps, capture, optionally compare a reference, and call onDone once.
+//
+// Lifetime: run() is asynchronous — it arms a juce::Timer and returns; onDone
+// fires several message-loop ticks later. The harness IS the Timer, so it must
+// stay alive until onDone runs. Hold it as a member of the object that owns the
+// editor (as the synthetic-rack self-check does), NOT as a local that goes out of
+// scope when run() returns — a destroyed harness is a Timer callback into freed
+// memory. `component` must likewise outlive the run (non-owning pointer).
 class PulpEmbedQaHarness : private juce::Timer {
 public:
     struct Options {
@@ -104,19 +112,32 @@ public:
     // Non-owning: `component` must outlive the run. `renderPath` receives the
     // deterministic raster. If `referencePath` exists, the raster is compared
     // against it and a mismatch is a failure. `onDone` fires exactly once.
+    // Overload with default Options — a `= {}` default argument can't be used
+    // for a nested type whose in-class initializers reference the still-
+    // incomplete enclosing class, so delegate through a function body instead.
+    void run(PulpEmbedComponent& component,
+             std::vector<Step> steps,
+             juce::File renderPath,
+             juce::File referencePath,
+             std::function<void(const Result&)> onDone) {
+        run(component, std::move(steps), std::move(renderPath),
+            std::move(referencePath), std::move(onDone), Options{});
+    }
+
     void run(PulpEmbedComponent& component,
              std::vector<Step> steps,
              juce::File renderPath,
              juce::File referencePath,
              std::function<void(const Result&)> onDone,
-             Options options = {}) {
+             Options options) {
         component_ = &component;
         steps_ = std::move(steps);
         renderPath_ = std::move(renderPath);
         referencePath_ = std::move(referencePath);
         onDone_ = std::move(onDone);
         opts_ = options;
-        waits_ = frames_ = 0;
+        waits_ = frames_ = postFrames_ = 0;
+        stepsRun_ = false;
         result_ = {};
         startTimer(opts_.intervalMs);
     }
@@ -128,6 +149,11 @@ private:
         if (onDone_) onDone_(result_);
     }
 
+    void pass(bool ok, const char* what) {
+        std::fprintf(stderr, "  [%s] %s\n", ok ? "PASS" : "FAIL", what);
+        if (!ok) ++result_.failures;
+    }
+
     void timerCallback() override {
         if (component_ == nullptr) { stopTimer(); return; }
         if (!component_->isOpened()) {
@@ -136,20 +162,22 @@ private:
         result_.opened = component_->isOpened();
         if (++frames_ < opts_.settleFrames) return;    // let live frames render
 
-        auto fail = [&](const char* what) {
-            std::fprintf(stderr, "  [FAIL] %s\n", what);
-            ++result_.failures;
-        };
-        auto pass = [&](bool ok, const char* what) {
-            std::fprintf(stderr, "  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-            if (!ok) ++result_.failures;
-        };
+        // Phase 1: run the caller's steps ONCE, then yield. A step that changes
+        // host/APVTS state needs the component's own tick + pumpHostToUi to
+        // propagate AND a frame to render before we capture — capturing in this
+        // same callback would grab the pre-step frame (the writeCapturePng
+        // gotcha). So we return and let settleFrames more frames render first.
+        if (!stepsRun_) {
+            if (!result_.opened) pass(false, "embed opened");
+            for (auto& s : steps_)
+                pass(s.run ? s.run() : false, s.name.toRawUTF8());
+            stepsRun_ = true;
+            postFrames_ = 0;
+            return;
+        }
+        if (++postFrames_ < opts_.settleFrames) return;  // let step effects render
 
-        if (!result_.opened) fail("embed never opened");
-
-        for (auto& s : steps_)
-            pass(s.run ? s.run() : false, s.name.toRawUTF8());
-
+        // Phase 2: the step effects have rendered — capture and compare.
         const int w = opts_.width > 0 ? opts_.width : component_->getWidth();
         const int h = opts_.height > 0 ? opts_.height : component_->getHeight();
         result_.deterministicWritten = component_->writeRenderPng(renderPath_, w, h);
@@ -177,7 +205,8 @@ private:
     juce::File renderPath_, referencePath_;
     std::function<void(const Result&)> onDone_;
     Options opts_;
-    int waits_ = 0, frames_ = 0;
+    int waits_ = 0, frames_ = 0, postFrames_ = 0;
+    bool stepsRun_ = false;
     Result result_;
 };
 

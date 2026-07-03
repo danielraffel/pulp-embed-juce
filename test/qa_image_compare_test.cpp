@@ -18,7 +18,8 @@ static void check(bool ok, const char* what) {
 static std::vector<std::uint8_t> solid(int w, int h, std::uint8_t r,
                                        std::uint8_t g, std::uint8_t b,
                                        std::uint8_t a = 255) {
-    std::vector<std::uint8_t> px(static_cast<std::size_t>(w) * h * 4u);
+    std::vector<std::uint8_t> px(
+        static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u);
     for (std::size_t i = 0; i < px.size(); i += 4) {
         px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = a;
     }
@@ -61,7 +62,7 @@ int main() {
     {
         auto a = solid(10, 10, 0, 0, 0);      // 100 pixels
         auto b = a;
-        for (int p = 0; p < 4; ++p) b[p * 4] = 255;  // 4 differing pixels = 4%
+        for (std::size_t p = 0; p < 4u; ++p) b[p * 4] = 255;  // 4 differing px = 4%
         auto strict = compareRgba(b.data(), a.data(), 10, 10, 0, /*maxFrac*/ 0.0);
         check(!strict.passed, "4% diff fails at 0 tolerance fraction");
         auto lenient = compareRgba(b.data(), a.data(), 10, 10, 0, /*maxFrac*/ 0.05);

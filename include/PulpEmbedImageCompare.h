@@ -58,7 +58,7 @@ inline ImageCompareResult compareRgba(const std::uint8_t* a, const std::uint8_t*
     const std::size_t bytes = r.totalPixels * 4u;
     for (std::size_t px = 0, i = 0; i < bytes; i += 4u, ++px) {
         int pixelDelta = 0;
-        for (int c = 0; c < 4; ++c) {
+        for (std::size_t c = 0; c < 4u; ++c) {
             const int d = static_cast<int>(a[i + c]) - static_cast<int>(b[i + c]);
             const int ad = d < 0 ? -d : d;
             if (ad > pixelDelta) pixelDelta = ad;
