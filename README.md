@@ -361,6 +361,36 @@ message loop (a frame-gated `startTimer` / `callAfterDelay`), and capture on the
 following callback. Capturing on the same tick is the classic "my PNG is blank /
 one edit behind" trap.
 
+### QA harness (`PulpEmbedQaHarness`)
+
+That drive → settle → capture → compare dance is packaged in
+`include/PulpEmbedQaHarness.h` so you don't re-roll the frame gating (or the
+timing trap) per plugin. Give it your `PulpEmbedComponent`, a list of named
+steps, an output path, and an optional reference PNG:
+
+```cpp
+pulp_juce::PulpEmbedQaHarness qa;
+qa.run(*embed,
+       { { "load_preset routed", [&] { return embed->dispatchHostAction("load_preset", R"({"index":2})"); } } },
+       outDir.getChildFile("render.png"),
+       referenceDir.getChildFile("golden.png"),   // omit (empty File) to skip compare
+       [](const auto& r) {
+           juce::JUCEApplicationBase::getInstance()->setApplicationReturnValue(r.ok() ? 0 : 1);
+           juce::JUCEApplicationBase::quit();
+       });
+```
+
+It waits for `isOpened()`, lets a few frames render, runs each step, writes the
+**deterministic** raster (`writeRenderPng` — CPU-stable, so a reference diff is
+meaningful on a GPU-less CI runner), and — the part the hand-rolled self-checks
+never had — diffs it against your reference via `PulpEmbedImageCompare.h`
+(per-channel tolerance + an allowed diff-pixel fraction for incidental
+antialiasing). Compare the deterministic raster, not the live GPU
+`writeCapturePng`, against a committed reference; reserve live-capture compares
+for a GPU lane. The pixel math is pure and unit-tested
+(`test/qa_image_compare_test.cpp`, `ctest -R qa-compare-test`); the JUCE glue is
+covered by `qa-harness-test`.
+
 ## Platform
 
 macOS today (JUCE `NSViewComponent` over Pulp's NSView child). Windows is the

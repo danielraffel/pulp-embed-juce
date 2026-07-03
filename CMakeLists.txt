@@ -280,4 +280,16 @@ if(PULP_EMBED_JUCE_BUILD_TESTS)
     target_include_directories(pulp-embed-juce-synthetic-rack-test PRIVATE
         examples/synthetic-rack)
     add_test(NAME synthetic-rack-test COMMAND pulp-embed-juce-synthetic-rack-test)
+
+    # QA harness — the reference-compare core (PulpEmbedImageCompare.h) is pure
+    # RGBA tolerance math with no JUCE/SDK dependency, so it builds and runs as a
+    # plain executable anywhere.
+    add_executable(pulp-embed-juce-qa-compare-test test/qa_image_compare_test.cpp)
+    add_test(NAME qa-compare-test COMMAND pulp-embed-juce-qa-compare-test)
+
+    # The JUCE glue on top (PulpEmbedQaHarness.h: juce::Image <-> RGBA + PNG-file
+    # compare) is compiled + exercised through the full adapter link surface.
+    pulp_embed_juce_add_console_test(pulp-embed-juce-qa-harness-test
+        test/qa_harness_test.cpp)
+    add_test(NAME qa-harness-test COMMAND pulp-embed-juce-qa-harness-test)
 endif()

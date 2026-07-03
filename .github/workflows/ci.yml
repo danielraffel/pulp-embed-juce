@@ -119,6 +119,8 @@ jobs:
             --target PulpEmbedJucePlugin_VST3 \
                      PulpEmbedJucePlugin_Standalone \
                      pulp-embed-juce-string-test \
+                     pulp-embed-juce-qa-compare-test \
+                     pulp-embed-juce-qa-harness-test \
             -j"$(sysctl -n hw.ncpu)"
 
       - name: Run headless adapter ABI self-check
@@ -131,6 +133,17 @@ jobs:
           else
             echo "::error::adapter ABI test binary not found under build/"; exit 1
           fi
+
+      - name: Run QA harness tests (compare core + JUCE glue)
+        run: |
+          set -euo pipefail
+          CMP="$(find build -type f -name 'pulp-embed-juce-qa-compare-test' -perm +111 | head -1)"
+          [ -x "$CMP" ] || { echo "::error::qa-compare-test binary not found"; exit 1; }
+          "$CMP"
+          HARN="build/pulp-embed-juce-qa-harness-test_artefacts/Release/pulp-embed-juce-qa-harness-test"
+          [ -x "$HARN" ] || HARN="$(find build -type f -name 'pulp-embed-juce-qa-harness-test' -perm +111 | head -1)"
+          [ -x "$HARN" ] || { echo "::error::qa-harness-test binary not found"; exit 1; }
+          "$HARN"
 
       - name: Headless editor self-check (Standalone)
         run: |
