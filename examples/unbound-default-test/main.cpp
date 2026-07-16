@@ -75,12 +75,6 @@ std::unique_ptr<pulp::view::View> makeEditor() {
     return std::make_unique<pulp::view::DesignFrameView>(svg, std::move(els));
 }
 
-int indexOfKey(const pulp_juce::PulpEmbedComponent& c, const juce::String& key) {
-    const auto params = c.designParams();
-    for (int i = 0; i < (int) params.size(); ++i)
-        if (params[(size_t) i].key == key) return i;
-    return -1;
-}
 }  // namespace
 
 int main() {
@@ -101,8 +95,8 @@ int main() {
     check(comp.boundParameterCount() == 1,
           "one control binds to a host parameter (the orphan stays unbound)");
 
-    const int gainIdx = indexOfKey(comp, "gain");
-    const int orphanIdx = indexOfKey(comp, "orphan");
+    const int gainIdx = comp.indexOfKey("gain");
+    const int orphanIdx = comp.indexOfKey("orphan");
     check(gainIdx >= 0 && orphanIdx >= 0, "both controls enumerate in the view");
 
     if (orphanIdx >= 0) {

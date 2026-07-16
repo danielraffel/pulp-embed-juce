@@ -230,6 +230,35 @@ version down (`min(header, pulp_embed_abi_version())`) and these dynamic
 features stay dormant; the `-1.0` unknown-key `get_param` sentinel keeps unbound
 controls at their imported defaults regardless.
 
+A paged control also **re-keys itself from inside the view** — no host call, no
+reload. The adapter follows it: the host→UI pump re-resolves its bindings
+whenever the view's key set moves (`pulp_embed_param_key_generation`, ABI v10) or
+the processor's parameter tree changes, so a re-keyed control keeps tracking
+automation. Both are gated, so an idle editor costs a single integer compare per
+tick rather than a full key re-enumeration — `keyResolveCount()` exposes how
+often the gate actually fired, and holds constant on an idle UI. Call
+`syncFromHost()` to pump immediately instead of waiting for the next tick.
+
+### Discrete controls: the divisor comes from the parameter (ABI v10)
+
+A design cannot know a host parameter's discreteness. A radio drawn with **3**
+visible options may be bound to a **6**-step parameter, and a control that
+derives its value from the number of options it draws addresses the wrong steps.
+Ask the host instead:
+
+```cpp
+const int steps = embed->hostParamStepCount("lfo_waveform");  // 6
+// 0 means CONTINUOUS or UNKNOWN — the two are deliberately indistinguishable,
+// so treat 0 as "do not use a step divisor" rather than a step count of zero.
+```
+
+Backed by `juce::AudioProcessorParameter::getNumSteps()`, so an
+`AudioParameterChoice` reports its choice count and an `AudioParameterBool`
+reports 2. JUCE has no "is continuous" predicate — it returns a large sentinel
+(`AudioProcessor::getDefaultNumParameterSteps()`) for a parameter that declared
+no step interval — and the adapter maps that sentinel to the contract's 0. The
+value is a step **count**, not a pre-computed divisor; derive the divisor from it.
+
 ### Resizable editor (one call)
 
 `configureResizableEditor()` reads the design's `pulp_embed_size_hints`, calls

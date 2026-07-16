@@ -6,14 +6,15 @@
 //   • STATIC top-level controls  — two knobs ("input.gain", "mix") whose
 //     DesignFrameElement::param_key is set once at construction. The embed's
 //     native-view lane binds these to the host's parameters by key==paramID with
-//     zero glue (element_param_key / element_for_param_key on origin/main).
+//     zero glue (element_param_key / element_for_param_key).
 //
 //   • A DYNAMIC "rack page"       — two knobs whose param_key is RE-ASSIGNED with
-//     set_element_param_key(i, key) when the user pages to another slot. Paging
-//     marks the embed's key→index registry dirty; on the next tick the shim
-//     rebuilds and resolves the new keys against the host's LIVE parameter table
-//     (the ABI v8 has_param / param_display_text surface the adapter backs). A
-//     value_label reads back the active slot's display text.
+//     set_element_param_key(i, key) when the user pages to another slot. The
+//     re-key re-points the embed's binding + key→index registry at the new key
+//     (both directions follow it), and bumps the ABI's key generation so the
+//     adapter's host→UI pump re-resolves the new keys against the host's LIVE
+//     parameter table (the ABI v8 has_param / param_display_text surface the
+//     adapter backs). A value_label reads back the active slot's display text.
 //
 //   • One Kind::action button     — "load_preset". In the live plugin the shim's
 //     on_action→host_action bridge (routed by the SDK's route_actions_to_host)
@@ -23,12 +24,6 @@
 //     populates).
 //
 // Everything is drawn from an inline SVG so the fixture needs no external assets.
-//
-// DEPENDENCY NOTE: set_element_param_key() is a newer SDK addition. It is
-// NOT yet on Pulp origin/main (which has param_key / element_param_key /
-// element_for_param_key but not the re-key mutator). This view is therefore
-// compile-shaped against the final DesignFrameView surface; it builds once
-// the re-key mutator lands. See examples/synthetic-rack/README.md.
 #pragma once
 
 #include <pulp/view/design_frame_view.hpp>

@@ -67,12 +67,10 @@ native `StateStore` surface; this example is the JUCE-embed end of that ratchet
 run as a real plugin. (Verify the SDK test is present on your Pulp checkout —
 it lands with the SDK host-param surface work.)
 
-## Dependencies / build gap (read before you `cmake`)
+## Dependencies (read before you `cmake`)
 
-This example is **compile-shaped against the final API surface**;
-it needs the following in-flight work present at build time. None of it is on the
-plain `origin/main` of the three repos yet, and a full build additionally needs
-JUCE + a GPU Pulp SDK + Skia:
+A full build needs JUCE + a GPU Pulp SDK + Skia, plus these surfaces across the
+three repos:
 
 1. **This repo** — the adapter surfaces (`hostHasParam`,
    `hostParamDisplayText`, `onHostAction` / `dispatchHostAction`,
@@ -80,12 +78,8 @@ JUCE + a GPU Pulp SDK + Skia:
 2. **`pulp-view-embed`** — ABI **v8** (`has_param` / `param_display_text` /
    `host_action` tail-append callbacks).
 3. **Pulp SDK** — `DesignFrameView::set_element_param_key(i, key)`, the
-   `HostParamSurface` / `View::host_params()` seam, and
-   `route_actions_to_host`. `origin/main` currently has `param_key` /
-   `element_param_key` / `element_for_param_key` but **not** the re-key mutator or
-   the host surfaces. The paging code in `SyntheticRackView` calls
-   `set_element_param_key` directly, so it builds once that mutator lands.
+   `HostParamSurface` / `View::host_params()` seam, and `route_actions_to_host`.
 
-Until those land, `synthetic-rack-test` and `SyntheticRackPlugin` are expected to
-fail to compile/link against a stock SDK — by design; they are the acceptance
-demo for this work, not proof it already shipped.
+All three are present, so this example builds against a current SDK. It needs an
+SDK new enough to carry the re-key mutator and the host surfaces; an older one
+fails at compile time on `set_element_param_key`.

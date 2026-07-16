@@ -91,6 +91,38 @@ public:
     // never per frame).
     juce::String hostParamDisplayText(const juce::String& key, double normalized) const;
 
+    // ── host param step count (ABI v10 adapter half) ───────────────────────
+    // The number of DISCRETE steps the host's parameter `key` has, or 0 for a
+    // continuous parameter / an unknown key / no processor. 0 means "continuous
+    // or unknown" — callers must not distinguish those.
+    //
+    // This is the divisor authority for a discrete control, and the design's own
+    // option count is NOT it: a design may draw 3 radio options for a parameter
+    // the host defines with 6 steps, so a control that derives its value from the
+    // number of options it draws addresses the wrong steps. The value is a step
+    // COUNT, not a pre-computed divisor — derive the divisor from it under the
+    // relevant normalization convention.
+    //
+    // This is the single source of truth the v10 host_param_steps callback
+    // trampolines into. It resolves against the SAME live parameter map as
+    // hostHasParam, so it follows a paged/re-keyed control.
+    int hostParamStepCount(const juce::String& key) const;
+
+    // Run one host->UI pump pass now, instead of waiting for the next 30 Hz tick:
+    // re-resolve the key set if it moved, then push any changed host values into
+    // the matching controls. The tick calls this for you — reach for it when a
+    // host has just changed state and wants the UI to reflect it immediately, or
+    // to drive the pump deterministically from a headless test with no message
+    // loop. No-op when constructed without a processor.
+    void syncFromHost();
+
+    // How many times the pump has re-resolved the view's key set. Steady state
+    // holds this CONSTANT — it moves only when the host's parameter tree changes
+    // (audioProcessorChanged) or the view re-keys an element. Exposed so the
+    // dirty gate is observable: a rising count on an idle UI means the pump is
+    // re-enumerating the ABI every tick.
+    int keyResolveCount() const noexcept;
+
     // UI->host write seams (the single source of truth the v8 set_param /
     // begin_gesture / end_gesture callbacks trampoline into). They resolve keys
     // against the SAME live parameter map as hostHasParam, so a paged/dynamic
@@ -163,6 +195,13 @@ public:
     // host<->UI initial sync — used to verify that an UNBOUND control kept its
     // imported default instead of snapping to 0.
     double controlValue(int index) const;
+
+    // The ABI index of the design control registered under `key`, or -1 if the
+    // view registers no such key. The index is what the index-addressed calls
+    // (controlValue, designParams()) take, so this is the bridge from the key a
+    // host thinks in to the index the ABI reports. Reflects the LIVE key set, so
+    // it follows a paged/re-keyed control.
+    int indexOfKey(const juce::String& key) const;
 
     // Static greenfield entry point: read a design's parameter descriptors WITHOUT
     // an editor/window (offscreen), so a processor can build its
@@ -269,6 +308,15 @@ private:
     // Push any host-side parameter changes (automation / preset recall) into the
     // matching controls. Called from the 30 Hz tick. No-op when bridge_ is null.
     void pumpHostToUi();
+    // Re-enumerate the view's registration keys and re-resolve each against the
+    // LIVE parameter map, replacing the previous bindings. The view's key set is
+    // not fixed for its lifetime — a paged control re-keys elements and a reload
+    // rebuilds the list — so these are refreshed, never snapshotted at mount.
+    void refreshBoundKeys();
+    // refreshBoundKeys(), gated on something actually having changed: the host's
+    // parameter tree (audioProcessorChanged) or the view's key set (the ABI's
+    // key generation counter). Cheap enough to call every tick.
+    void refreshBoundKeysIfDirty();
 
     struct HostBridge;  // defined in the .cpp; holds the juce::AudioProcessor map
     std::unique_ptr<HostBridge> bridge_;
