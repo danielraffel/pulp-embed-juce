@@ -683,7 +683,16 @@ bool PulpEmbedComponent::simulateParamDragToValue(const juce::String& key,
     // number of steps, so the last index -- and the divisor -- is count - 1.
     // The design's own option count is NOT the authority here (a design may draw
     // fewer options than the parameter has steps), which is why this asks the host.
-    const int steps = hostParamStepCount(key);
+    //
+    // Read through the embed rather than hostParamStepCount(): both ultimately
+    // come from this component -- the v10 callback trampolines into it -- but the
+    // embed answers from the snapshot it refreshes at tick, and that snapshot is
+    // what the VIEW scales the control by. This drive presses the control and then
+    // verifies arrival with controlValue(), a view-side read, so its target has to
+    // sit on the grid the view is actually on. Snapping to the live map instead
+    // would, in the window between a host-side change and the next tick, compute a
+    // target the control cannot land on and then report the miss as a failure.
+    const int steps = static_cast<int>(pulp_embed_param_steps(view_, key.toRawUTF8()));
     if (steps > 1) {
         const double divisor = static_cast<double>(steps - 1);
         target = std::round(target * divisor) / divisor;

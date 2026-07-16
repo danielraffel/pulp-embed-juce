@@ -106,6 +106,14 @@ public:
     // This is the single source of truth the v10 host_param_steps callback
     // trampolines into. It resolves against the SAME live parameter map as
     // hostHasParam, so it follows a paged/re-keyed control.
+    //
+    // It is the HOST side of the count, and it is deliberately not what the view
+    // scales by. The embed snapshots this answer once per tick, and the view — and
+    // simulateParamDragToValue, which must agree with the view — read that
+    // snapshot (pulp_embed_param_steps). So this reports what the parameter says
+    // NOW, which can lead the view by up to one tick after a host-side change.
+    // Prefer it for host-side questions; for "what grid is the control on", ask
+    // the embed.
     int hostParamStepCount(const juce::String& key) const;
 
     // Run one host->UI pump pass now, instead of waiting for the next 30 Hz tick:

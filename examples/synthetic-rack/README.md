@@ -78,7 +78,8 @@ three repos:
 2. **`pulp-view-embed`** — ABI **v8** (`has_param` / `param_display_text` /
    `host_action` tail-append callbacks).
 3. **Pulp SDK** — `DesignFrameView::set_element_param_key(i, key)`, the
-   `HostParamSurface` / `View::host_params()` seam, and `route_actions_to_host`.
+   `HostParamSurface` / `View::host_params()` seam, and the
+   `HostActionSurface` / `View::host_actions()` seam.
 
 All three are present, so this example builds against a current SDK. It needs an
 SDK new enough to carry the re-key mutator and the host surfaces; an older one
