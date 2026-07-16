@@ -4,6 +4,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>  // bind to a real processor
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -652,6 +653,109 @@ double PulpEmbedComponent::controlValue(int index) const {
     if (view_ == nullptr || index < 0 || index >= pulp_embed_param_count(view_))
         return -1.0;
     return pulp_embed_param_value(view_, index);
+}
+
+namespace {
+// Drive-loop tuning. The loop MEASURES the control's response instead of
+// modelling it, so these only bound the search, they do not encode any law.
+constexpr double kDriveTolerance = 1.0e-3;  // "arrived" (values are normalized)
+constexpr double kDriveProbePx   = 12.0;    // first probe travel, view px
+constexpr int    kDriveMaxSteps  = 16;      // secant refinements before giving up
+constexpr double kDriveDeadZone  = 1.0e-9;  // below this a probe moved nothing
+}  // namespace
+
+bool PulpEmbedComponent::simulateParamDragToValue(const juce::String& key,
+                                                  double normalized) {
+    if (view_ == nullptr) return false;
+
+    const int index = indexOfKey(key);
+    if (index < 0) {
+        // A key the view does not register. Loud, because the caller believes this
+        // control exists — a quiet false would let a typo'd or renamed key look
+        // like a tested control forever.
+        juce::Logger::writeToLog("PulpEmbedComponent::simulateParamDragToValue: no control "
+                                 "registered under key '" + key + "'");
+        return false;
+    }
+
+    double target = juce::jlimit(0.0, 1.0, normalized);
+    // Snap onto the HOST's step grid for a discrete parameter. The count is a
+    // number of steps, so the last index -- and the divisor -- is count - 1.
+    // The design's own option count is NOT the authority here (a design may draw
+    // fewer options than the parameter has steps), which is why this asks the host.
+    const int steps = hostParamStepCount(key);
+    if (steps > 1) {
+        const double divisor = static_cast<double>(steps - 1);
+        target = std::round(target * divisor) / divisor;
+    }
+
+    double hx = 0.0, hy = 0.0;
+    if (pulp_embed_param_hit_point(view_, index, &hx, &hy) != PULP_EMBED_OK) {
+        char err[512] = {0};
+        pulp_embed_last_error(view_, err, sizeof err);
+        juce::Logger::writeToLog("PulpEmbedComponent::simulateParamDragToValue: cannot locate "
+                                 "control '" + key + "': " + juce::String::fromUTF8(err));
+        return false;
+    }
+
+    // Already there: do nothing at all, and in particular do NOT press. A press is
+    // not a neutral probe — on a latching control (a toggle) it FLIPS, so pressing
+    // first and asking questions after would drive a correct control to the wrong
+    // value and then report failure. Nothing to do is a success.
+    if (std::abs(controlValue(index) - target) <= kDriveTolerance) return true;
+
+    // From here on a gesture is open, so every exit must release it: leaving the
+    // pointer captured would strand the host's undo bracket open and wedge the
+    // next drive.
+    pulp_embed_dispatch_mouse_down(view_, hx, hy);
+
+    double y0 = hy, v0 = controlValue(index);
+    const auto release = [&](double y) {
+        pulp_embed_dispatch_mouse_up(view_, hx, y);
+        return std::abs(controlValue(index) - target) <= kDriveTolerance;
+    };
+    // A latching control commits on the press itself and ignores the drag, so it
+    // has already arrived (or never will) by now.
+    if (std::abs(v0 - target) <= kDriveTolerance) return release(y0);
+
+    // Probe once TOWARDS the target to measure the control's response. Probing
+    // toward it keeps the sample off the far clamp, where the response would read
+    // as flat. Which way is "increase" is the control's business, so if the first
+    // direction moves nothing, try the other before concluding it is dead.
+    const auto probe = [&](double dir) {
+        const double y = hy - dir * kDriveProbePx;
+        pulp_embed_dispatch_mouse_drag(view_, hx, y);
+        return std::pair<double, double>{y, controlValue(index)};
+    };
+    auto [y1, v1] = probe(target > v0 ? 1.0 : -1.0);
+    if (std::abs(v1 - v0) < kDriveDeadZone) std::tie(y1, v1) = probe(target > v0 ? -1.0 : 1.0);
+    if (std::abs(v1 - v0) < kDriveDeadZone) {
+        juce::Logger::writeToLog("PulpEmbedComponent::simulateParamDragToValue: control '" + key +
+                                 "' did not respond to a drag (is it enabled / draggable?)");
+        release(y1);
+        return false;
+    }
+
+    // Secant search on the control's OWN response curve: each drag is measured,
+    // never predicted. This is what keeps the drive independent of the drag law --
+    // sensitivity, direction and scaling can all change in the view without
+    // touching this, and a law that regressed would fail to converge rather than
+    // be faithfully reproduced by a matching inverse here.
+    for (int step = 0; step < kDriveMaxSteps && std::abs(v1 - target) > kDriveTolerance; ++step) {
+        const double slope = (v1 - v0) / (y1 - y0);
+        if (std::abs(slope) < kDriveDeadZone) break;  // flat: clamped or stuck
+        const double y2 = y1 + (target - v1) / slope;
+        pulp_embed_dispatch_mouse_drag(view_, hx, y2);
+        y0 = y1; v0 = v1;
+        y1 = y2; v1 = controlValue(index);
+    }
+
+    const bool arrived = release(y1);
+    if (!arrived)
+        juce::Logger::writeToLog("PulpEmbedComponent::simulateParamDragToValue: control '" + key +
+                                 "' stopped at " + juce::String(controlValue(index), 4) +
+                                 ", short of " + juce::String(target, 4));
+    return arrived;
 }
 
 int PulpEmbedComponent::indexOfKey(const juce::String& key) const {

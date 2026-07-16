@@ -365,6 +365,66 @@ PULP_EMBED_SELFCHECK=1 \
 pluginval's editor open/close test additionally exercises the editor lifecycle
 under a host. **Remaining manual step:** load in a real DAW (Logic, REAPER, …).
 
+### Drive a control by (key, value) — through the real gesture path
+
+`simulateParamDragToValue` moves a named control to a normalized value by
+synthesizing a **real pointer gesture** on it: it resolves the key to its
+control, asks the ABI where that control is (`pulp_embed_param_hit_point`), then
+presses / drags / releases at those coordinates.
+
+```cpp
+if (!embed->simulateParamDragToValue("cutoff", 0.8))
+    return fail("cutoff is not drivable");
+// The host parameter has already moved — assert it now (see the note below).
+```
+
+It runs the same code a user's mouse runs — hit-test, capture, the control's own
+drag law, its emit path, the host bridge — so a regression anywhere along it
+makes this **fail** rather than pass. That is the whole point: a helper that
+reached past hit-testing and poked the value in would stay green while the UI was
+unclickable, and a test that cannot fail the way production fails is worth little.
+
+Two consequences worth knowing:
+
+- **It returns `false`, never a silent no-op**, for an unknown key, a control the
+  ABI cannot locate, or a control that does not respond to the drag — each logs
+  which. In a QA harness a silent no-op is the worst outcome: it makes a broken
+  control look tested. Treat `false` as a failed check.
+- **It does not model the drag law, it measures it.** The loop probes the control,
+  reads back what it did, and converges — so knob vs fader sensitivity, direction,
+  and window scaling are all handled without this code knowing any of them, and a
+  law that regressed fails to converge rather than being faithfully mirrored by a
+  matching inverse here.
+
+Discrete parameters are snapped onto the host's step grid first, so you can pass a
+rounded value and still land on the intended step. The divisor is the step
+**count minus one** — see [the divisor section](#discrete-controls-the-divisor-comes-from-the-parameter-abi-v10).
+
+### Gotcha: assert the host *parameter*, not the engine — but do it synchronously
+
+A UI write reaches the **host parameter** synchronously: by the time
+`simulateParamDragToValue` (or a real mouse-up) returns, `getValue()` on the
+parameter is already the new value. The plugin's own DSP/engine state is a
+different thing — it is pulled from the parameter on the **audio thread, once per
+block** — and a headless harness usually has **no audio callback at all**, so that
+state may never update no matter how long you wait.
+
+```cpp
+embed->simulateParamDragToValue("cutoff", 0.8);
+
+// RIGHT — the parameter is the synchronous, host-facing truth.
+auto* p = processor.getParameters()[cutoffIndex];
+check(std::abs(p->getValue() - 0.8f) < 1e-3f);
+
+// WRONG — engine state is filled in by processBlock, which never ran here.
+check(dsp.currentCutoff() == ...);   // hangs on a "flaky" failure forever
+```
+
+So: assert the parameter, and assert it *immediately* — no waiting, no yielding.
+Waiting for engine state to catch up in a headless harness is a wait that never
+ends. (Do not confuse this with the capture rule below, which is the opposite
+shape: pixels *do* need a frame to pass first.)
+
 ### Gotcha: capture on the *next* message-loop callback, not the same tick
 
 A screen capture (`writeCapturePng` and friends) only records what has actually

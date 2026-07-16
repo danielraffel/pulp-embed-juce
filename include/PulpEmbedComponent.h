@@ -203,6 +203,39 @@ public:
     // it follows a paged/re-keyed control.
     int indexOfKey(const juce::String& key) const;
 
+    // ── drive a control by (key, value) ─────────────────────────────────────
+    // Move the design control registered under `key` to the normalized [0,1]
+    // `normalized`, by SYNTHESIZING A REAL POINTER GESTURE on it: resolve the key
+    // to its control, ask the ABI where that control is, then press / drag / release
+    // at those coordinates. It runs the same code a user's mouse runs — hit-test,
+    // capture, the control's own drag law, its emit path, the host bridge — so a
+    // regression anywhere along it makes this FAIL rather than pass. That is the
+    // point: a helper that reached past hit-testing and poked the value in would
+    // stay green while the UI was unclickable.
+    //
+    // Returns true only when the control actually ARRIVED at the value (verified
+    // by reading it back). Returns false — never a silent no-op — for an unknown
+    // key, a control the ABI cannot locate, or a control that does not respond to
+    // the drag; each logs which of those it was. A false here means "this control
+    // is not drivable", which in a QA harness must read as a failure, not a pass.
+    //
+    // `normalized` is snapped to the host parameter's step grid first when the host
+    // reports `key` as discrete (see hostParamStepCount), so a caller can pass a
+    // rounded-off value and still land on the intended step.
+    //
+    // What it does NOT assert is the HOST parameter: this drives the UI and returns
+    // whether the UI arrived. Whether the write reached the host parameter is the
+    // very thing a caller should assert separately — see hostParamValue-style checks
+    // in a harness — because folding it in here would hide a broken UI->host bridge
+    // behind a true return. Note also that a host parameter write lands on the host
+    // parameter SYNCHRONOUSLY, while the plugin's own DSP state is pulled from it on
+    // the audio thread per block: assert the parameter, not the engine, right after
+    // this call — a headless harness may have no audio callback at all.
+    //
+    // UI thread only, and it needs the view laid out (a non-zero size) — the
+    // control's coordinates do not exist before its first layout.
+    bool simulateParamDragToValue(const juce::String& key, double normalized);
+
     // Static greenfield entry point: read a design's parameter descriptors WITHOUT
     // an editor/window (offscreen), so a processor can build its
     // AudioProcessorValueTreeState::ParameterLayout at construction time straight

@@ -280,6 +280,15 @@ if(PULP_EMBED_JUCE_BUILD_TESTS)
         examples/live-key-test/main.cpp)
     add_test(NAME live-key-test COMMAND pulp-embed-juce-live-key-test)
 
+    # Driving a control by (key, value) through the REAL pointer path: the host
+    # parameter must arrive, bracketed by one ordered begin/end gesture; a control
+    # hit-testing skips and an unknown key must FAIL rather than no-op green; and a
+    # discrete parameter must land on the intended index across its whole range
+    # (the divisor is the host's step count minus one).
+    pulp_embed_juce_add_console_test(pulp-embed-juce-param-drive-test
+        examples/param-drive-test/main.cpp)
+    add_test(NAME param-drive-test COMMAND pulp-embed-juce-param-drive-test)
+
     # P4.1 — the canonical fixture's headless self-check: the SyntheticRackView
     # paging/re-key + host-action logic in isolation, then the embed adapter
     # surfaces (static + paged binding, display text, action) against a real
