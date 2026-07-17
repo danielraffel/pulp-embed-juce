@@ -16,6 +16,32 @@
 #include <utility>
 #include <vector>
 
+// The ABI floor, enforced rather than described. This adapter calls v10/v11
+// entry points (pulp_embed_param_steps, pulp_embed_param_key_generation,
+// pulp_embed_param_hit_point) on unconditional paths, so it cannot build
+// against an older pulp_view_embed.h no matter what any #if here claims.
+//
+// Stating a hard minimum is the honest option, not a reluctant one:
+//   - The header is not a versioned artifact. CMake does
+//     add_subdirectory(PULP_VIEW_EMBED_DIR), so the header and the library it
+//     declares are compiled from ONE checkout and cannot skew. The only way to
+//     land below this floor is to deliberately point at an older checkout.
+//   - The floor is unreleased anyway. v10/v11 are backed by Pulp SDK APIs
+//     (HostParamSurface::param_step_count, DesignFrameView::element_hit_point)
+//     that are absent from every published release and are not yet on main, so
+//     no working pre-v10 configuration exists to preserve.
+//   - v11 is not additive over v10: value-less controls (buttons, readouts,
+//     text fields) left the param enumeration, so a pre-v11 build would be
+//     wrong rather than merely degraded. See DesignParamDesc in the header.
+//
+// A version guard here is a promise to test the guarded-out path. This repo is
+// an experiment with a single in-tree consumer and no released ABI to be
+// compatible with; the previous attempt at that promise silently broke one ABI
+// version after it was made. Fail loudly at compile time instead.
+static_assert(PULP_VIEW_EMBED_ABI_VERSION >= 11u,
+              "pulp-embed-juce requires pulp_view_embed ABI v11 or newer. "
+              "Point -DPULP_VIEW_EMBED_DIR at a checkout that provides it.");
+
 namespace pulp_juce {
 
 // Maps the embedded design's control keys to a juce::AudioProcessor's
@@ -255,11 +281,18 @@ PulpEmbedComponent::PulpEmbedComponent(pulp::embed::NativeViewFactory factory,
 PulpEmbedDesc PulpEmbedComponent::buildDesc(int logicalWidth, int logicalHeight) const {
     PulpEmbedDesc desc{};
     desc.struct_size = sizeof(PulpEmbedDesc);
-    // Clamp to what the RUNTIME library supports (statically-linked shim today,
-    // but a future prebuilt dylib may predate these headers). check_desc rejects
+    // Clamp to what the RUNTIME library supports. check_desc rejects
     // abi_version > library version, so a header-newer-than-library skew must
     // negotiate DOWN — the shim's struct_size/offset clamp then simply ignores
     // callbacks the older library doesn't know about.
+    //
+    // This is the RUNTIME axis, and it is narrower than it looks: the library is
+    // built from the same checkout as the header (add_subdirectory), so today
+    // the two cannot skew and this clamp is a no-op. It covers only the desc's
+    // callback tail for a hypothetical future prebuilt dylib — NOT the v10/v11
+    // entry points this file calls unconditionally, which such a dylib would
+    // fail to resolve. Supporting an older runtime means resolving those
+    // dynamically, not tightening this line.
     desc.abi_version = static_cast<uint32_t>(
         juce::jmin<uint32_t>(PULP_VIEW_EMBED_ABI_VERSION, pulp_embed_abi_version()));
     desc.logical_width = logicalWidth;
@@ -281,24 +314,14 @@ PulpEmbedDesc PulpEmbedComponent::buildDesc(int logicalWidth, int logicalHeight)
         // ABI v6 string side-channel (text_field <-> plugin state), same host_ctx.
         desc.host.set_string = &HostBridge::setString;
         desc.host.get_string = &HostBridge::getString;
-       #if PULP_VIEW_EMBED_ABI_VERSION >= 8
-        // ABI v8 tail-append: runtime host-param accessor + action channel.
-        // Gated on the header version so the adapter still compiles against a
-        // pre-v8 pulp_view_embed.h (the struct lacks these members there). The
-        // trampolines above are unconditional and unit-tested via the
-        // hostHasParam / hostParamDisplayText / dispatchHostAction seams, so the
-        // backing is exercised even before the v8 ABI lands in the sibling repo.
+        // v8 tail-append: runtime host-param accessor + action channel.
         desc.host.has_param = &HostBridge::hasParam;
         desc.host.param_display_text = &HostBridge::paramDisplayText;
         desc.host.host_action = &HostBridge::hostAction;
-       #endif
-       #if PULP_VIEW_EMBED_ABI_VERSION >= 10
-        // ABI v10 tail-append: the host's discrete step count per key. Gated on
-        // the header version like the v8 tail above; a runtime library older than
-        // v10 simply stops before this field (struct_size gating), so the
-        // trampoline is never called.
+        // v10 tail-append: the host's discrete step count per key. A runtime
+        // library older than the header stops before this field (struct_size
+        // gating), so the trampoline is simply never called.
         desc.host.host_param_steps = &HostBridge::hostParamSteps;
-       #endif
     }
     return desc;
 }
@@ -435,13 +458,7 @@ void PulpEmbedComponent::refreshBoundKeys() {
 // otherwise this is one atomic read plus one integer compare, and the caller
 // falls straight through to the value poll.
 void PulpEmbedComponent::refreshBoundKeysIfDirty() {
-   #if PULP_VIEW_EMBED_ABI_VERSION >= 10
     const uint64_t gen = pulp_embed_param_key_generation(view_);
-   #else
-    // Pre-v10 runtimes expose no key-set signal, so a view-driven re-key is
-    // invisible here and only a host tree change re-resolves.
-    const uint64_t gen = bridge_->lastKeyGeneration;
-   #endif
     const bool hostMoved = bridge_->keysDirty.exchange(false);
     if (!hostMoved && gen == bridge_->lastKeyGeneration) return;
     bridge_->lastKeyGeneration = gen;

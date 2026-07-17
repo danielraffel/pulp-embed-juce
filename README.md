@@ -225,10 +225,20 @@ embed->onHostAction = [&](const juce::String& action, const juce::var& args) {
 };
 ```
 
-When constructed against a pre-v8 runtime library the adapter negotiates the ABI
-version down (`min(header, pulp_embed_abi_version())`) and these dynamic
-features stay dormant; the `-1.0` unknown-key `get_param` sentinel keeps unbound
-controls at their imported defaults regardless.
+The adapter still negotiates the ABI version down against an older runtime
+library (`min(header, pulp_embed_abi_version())`), which keeps the desc's
+callback tail safe and leaves these dynamic features dormant; the `-1.0`
+unknown-key `get_param` sentinel keeps unbound controls at their imported
+defaults regardless.
+
+**The header, though, has a hard floor: pulp_view_embed ABI v11** — a
+`static_assert` enforces it. The adapter calls v10/v11 entry points
+unconditionally, so it cannot build against an older `pulp_view_embed.h`. That
+floor costs nothing today: CMake builds the library from the same checkout as
+the header (`add_subdirectory(PULP_VIEW_EMBED_DIR)`), so the two cannot skew,
+and v10/v11 are backed by Pulp SDK APIs that are not in any published release.
+v11 is also not additive over v10 — value-less controls left the parameter
+enumeration — so a pre-v11 build would be wrong, not merely degraded.
 
 A paged control also **re-keys itself from inside the view** — no host call, no
 reload. The adapter follows it: the host→UI pump re-resolves its bindings
