@@ -225,10 +225,49 @@ embed->onHostAction = [&](const juce::String& action, const juce::var& args) {
 };
 ```
 
-When constructed against a pre-v8 runtime library the adapter negotiates the ABI
-version down (`min(header, pulp_embed_abi_version())`) and these dynamic
-features stay dormant; the `-1.0` unknown-key `get_param` sentinel keeps unbound
-controls at their imported defaults regardless.
+The adapter still negotiates the ABI version down against an older runtime
+library (`min(header, pulp_embed_abi_version())`), which keeps the desc's
+callback tail safe and leaves these dynamic features dormant; the `-1.0`
+unknown-key `get_param` sentinel keeps unbound controls at their imported
+defaults regardless.
+
+**The header, though, has a hard floor: pulp_view_embed ABI v11** — a
+`static_assert` enforces it. The adapter calls v10/v11 entry points
+unconditionally, so it cannot build against an older `pulp_view_embed.h`. That
+floor costs nothing today: CMake builds the library from the same checkout as
+the header (`add_subdirectory(PULP_VIEW_EMBED_DIR)`), so the two cannot skew,
+and v10/v11 are backed by Pulp SDK APIs that are not in any published release.
+v11 is also not additive over v10 — value-less controls left the parameter
+enumeration — so a pre-v11 build would be wrong, not merely degraded.
+
+A paged control also **re-keys itself from inside the view** — no host call, no
+reload. The adapter follows it: the host→UI pump re-resolves its bindings
+whenever the view's key set moves (`pulp_embed_param_key_generation`, ABI v10) or
+the processor's parameter tree changes, so a re-keyed control keeps tracking
+automation. Both are gated, so an idle editor costs a single integer compare per
+tick rather than a full key re-enumeration — `keyResolveCount()` exposes how
+often the gate actually fired, and holds constant on an idle UI. Call
+`syncFromHost()` to pump immediately instead of waiting for the next tick.
+
+### Discrete controls: the divisor comes from the parameter (ABI v10)
+
+A design cannot know a host parameter's discreteness. A radio drawn with **3**
+visible options may be bound to a **6**-step parameter, and a control that
+derives its value from the number of options it draws addresses the wrong steps.
+Ask the host instead:
+
+```cpp
+const int steps = embed->hostParamStepCount("lfo_waveform");  // 6
+// 0 means CONTINUOUS or UNKNOWN — the two are deliberately indistinguishable,
+// so treat 0 as "do not use a step divisor" rather than a step count of zero.
+```
+
+Backed by `juce::AudioProcessorParameter::getNumSteps()`, so an
+`AudioParameterChoice` reports its choice count and an `AudioParameterBool`
+reports 2. JUCE has no "is continuous" predicate — it returns a large sentinel
+(`AudioProcessor::getDefaultNumParameterSteps()`) for a parameter that declared
+no step interval — and the adapter maps that sentinel to the contract's 0. The
+value is a step **count**, not a pre-computed divisor; derive the divisor from it.
 
 ### Resizable editor (one call)
 
@@ -335,6 +374,66 @@ PULP_EMBED_SELFCHECK=1 \
 
 pluginval's editor open/close test additionally exercises the editor lifecycle
 under a host. **Remaining manual step:** load in a real DAW (Logic, REAPER, …).
+
+### Drive a control by (key, value) — through the real gesture path
+
+`simulateParamDragToValue` moves a named control to a normalized value by
+synthesizing a **real pointer gesture** on it: it resolves the key to its
+control, asks the ABI where that control is (`pulp_embed_param_hit_point`), then
+presses / drags / releases at those coordinates.
+
+```cpp
+if (!embed->simulateParamDragToValue("cutoff", 0.8))
+    return fail("cutoff is not drivable");
+// The host parameter has already moved — assert it now (see the note below).
+```
+
+It runs the same code a user's mouse runs — hit-test, capture, the control's own
+drag law, its emit path, the host bridge — so a regression anywhere along it
+makes this **fail** rather than pass. That is the whole point: a helper that
+reached past hit-testing and poked the value in would stay green while the UI was
+unclickable, and a test that cannot fail the way production fails is worth little.
+
+Two consequences worth knowing:
+
+- **It returns `false`, never a silent no-op**, for an unknown key, a control the
+  ABI cannot locate, or a control that does not respond to the drag — each logs
+  which. In a QA harness a silent no-op is the worst outcome: it makes a broken
+  control look tested. Treat `false` as a failed check.
+- **It does not model the drag law, it measures it.** The loop probes the control,
+  reads back what it did, and converges — so knob vs fader sensitivity, direction,
+  and window scaling are all handled without this code knowing any of them, and a
+  law that regressed fails to converge rather than being faithfully mirrored by a
+  matching inverse here.
+
+Discrete parameters are snapped onto the host's step grid first, so you can pass a
+rounded value and still land on the intended step. The divisor is the step
+**count minus one** — see [the divisor section](#discrete-controls-the-divisor-comes-from-the-parameter-abi-v10).
+
+### Gotcha: assert the host *parameter*, not the engine — but do it synchronously
+
+A UI write reaches the **host parameter** synchronously: by the time
+`simulateParamDragToValue` (or a real mouse-up) returns, `getValue()` on the
+parameter is already the new value. The plugin's own DSP/engine state is a
+different thing — it is pulled from the parameter on the **audio thread, once per
+block** — and a headless harness usually has **no audio callback at all**, so that
+state may never update no matter how long you wait.
+
+```cpp
+embed->simulateParamDragToValue("cutoff", 0.8);
+
+// RIGHT — the parameter is the synchronous, host-facing truth.
+auto* p = processor.getParameters()[cutoffIndex];
+check(std::abs(p->getValue() - 0.8f) < 1e-3f);
+
+// WRONG — engine state is filled in by processBlock, which never ran here.
+check(dsp.currentCutoff() == ...);   // hangs on a "flaky" failure forever
+```
+
+So: assert the parameter, and assert it *immediately* — no waiting, no yielding.
+Waiting for engine state to catch up in a headless harness is a wait that never
+ends. (Do not confuse this with the capture rule below, which is the opposite
+shape: pixels *do* need a frame to pass first.)
 
 ### Gotcha: capture on the *next* message-loop callback, not the same tick
 

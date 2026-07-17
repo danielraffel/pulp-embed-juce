@@ -271,6 +271,24 @@ if(PULP_EMBED_JUCE_BUILD_TESTS)
         examples/host-surface-test/main.cpp)
     add_test(NAME host-surface-test COMMAND pulp-embed-juce-host-surface-test)
 
+    # The host->UI pump against a LIVE key set: a view-driven re-key (paged rack)
+    # must re-resolve the bindings so the re-keyed element tracks its NEW
+    # parameter, while an idle pump must not re-enumerate the key set every tick.
+    # Also covers the v10 step-count seam (the parameter's steps, not the design's
+    # option count).
+    pulp_embed_juce_add_console_test(pulp-embed-juce-live-key-test
+        examples/live-key-test/main.cpp)
+    add_test(NAME live-key-test COMMAND pulp-embed-juce-live-key-test)
+
+    # Driving a control by (key, value) through the REAL pointer path: the host
+    # parameter must arrive, bracketed by one ordered begin/end gesture; a control
+    # hit-testing skips and an unknown key must FAIL rather than no-op green; and a
+    # discrete parameter must land on the intended index across its whole range
+    # (the divisor is the host's step count minus one).
+    pulp_embed_juce_add_console_test(pulp-embed-juce-param-drive-test
+        examples/param-drive-test/main.cpp)
+    add_test(NAME param-drive-test COMMAND pulp-embed-juce-param-drive-test)
+
     # P4.1 — the canonical fixture's headless self-check: the SyntheticRackView
     # paging/re-key + host-action logic in isolation, then the embed adapter
     # surfaces (static + paged binding, display text, action) against a real

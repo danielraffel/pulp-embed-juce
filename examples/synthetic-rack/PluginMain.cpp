@@ -57,9 +57,10 @@ public:
             juce::Logger::writeToLog("SyntheticRack embed failed: " + embed_->lastError());
         addAndMakeVisible(*embed_);
 
-        // The host-action channel. In the live plugin the shim routes
-        // the "load_preset" Kind::action button here (route_actions_to_host →
-        // host_action ABI → onHostAction).
+        // The host-action channel. The view sends its "load_preset" button out
+        // View::host_actions(); the shim backs that surface with the host_action
+        // ABI callback, which lands here (host_actions() → host_action ABI →
+        // onHostAction).
         embed_->onHostAction = [this](const juce::String& action, const juce::var& args) {
             if (action == "load_preset") {
                 loadPreset((int) args.getProperty("index", 0));

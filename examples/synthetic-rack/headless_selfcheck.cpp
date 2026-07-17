@@ -21,8 +21,13 @@
 #include "SyntheticRackProcessor.h"
 #include "SyntheticRackView.h"
 
+#include <pulp/view/host_param_surface.hpp>
+
 #include <cstdio>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 int g_fail = 0;
@@ -66,6 +71,42 @@ int main() {
         // A non-paging action falls through to the host hook.
         view.on_action("load_preset");
         check(routed == "load_preset", "non-paging action forwarded to the host hook");
+    }
+
+    // ── Part A2: the channel the LIVE plugin actually uses ──────────────────
+    // Part A proves the local hook, which only fires where no host installed a
+    // surface. In a plugin the embed DOES install one, and the button must reach
+    // it — that leg is what carries a click to onHostAction, and nothing above
+    // touches it. Installing a recording surface drives the same seam the embed
+    // provides, without needing an ABI round-trip.
+    {
+        struct RecordingSurface : pulp::view::HostActionSurface {
+            std::vector<std::pair<std::string, std::string>> sent;
+        protected:
+            bool do_send_host_action(std::string_view a, std::string_view j) override {
+                sent.emplace_back(std::string(a), std::string(j));
+                return true;
+            }
+        };
+
+        synth_rack::SyntheticRackView view;
+        RecordingSurface surface;
+        view.set_host_actions(&surface);
+
+        // Paging stays view-internal: a chevron must not reach the host as a
+        // command it never declared. This is why the view sends explicitly rather
+        // than arming the frame's blanket route_actions_to_host.
+        view.on_action("rack.next");
+        check(surface.sent.empty(), "a paging chevron does not reach the host surface");
+        check(view.current_slot() == 1, "the chevron still paged locally");
+
+        view.on_action("load_preset");
+        check(surface.sent.size() == 1, "load_preset reaches the host surface");
+        if (surface.sent.size() == 1) {
+            check(surface.sent[0].first == "load_preset",
+                  "the surface received the action id");
+            check(surface.sent[0].second == "{}", "the surface received an args payload");
+        }
     }
 
     // ── Part B: the embed adapter surfaces against a real processor ─────────

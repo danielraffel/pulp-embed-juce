@@ -4,15 +4,43 @@
 #include <juce_audio_processors/juce_audio_processors.h>  // bind to a real processor
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+// The ABI floor, enforced rather than described. This adapter calls v10/v11
+// entry points (pulp_embed_param_steps, pulp_embed_param_key_generation,
+// pulp_embed_param_hit_point) on unconditional paths, so it cannot build
+// against an older pulp_view_embed.h no matter what any #if here claims.
+//
+// Stating a hard minimum is the honest option, not a reluctant one:
+//   - The header is not a versioned artifact. CMake does
+//     add_subdirectory(PULP_VIEW_EMBED_DIR), so the header and the library it
+//     declares are compiled from ONE checkout and cannot skew. The only way to
+//     land below this floor is to deliberately point at an older checkout.
+//   - The floor is unreleased anyway. v10/v11 are backed by Pulp SDK APIs
+//     (HostParamSurface::param_step_count, DesignFrameView::element_hit_point)
+//     that are absent from every published release and are not yet on main, so
+//     no working pre-v10 configuration exists to preserve.
+//   - v11 is not additive over v10: value-less controls (buttons, readouts,
+//     text fields) left the param enumeration, so a pre-v11 build would be
+//     wrong rather than merely degraded. See DesignParamDesc in the header.
+//
+// A version guard here is a promise to test the guarded-out path. This repo is
+// an experiment with a single in-tree consumer and no released ABI to be
+// compatible with; the previous attempt at that promise silently broke one ABI
+// version after it was made. Fail loudly at compile time instead.
+static_assert(PULP_VIEW_EMBED_ABI_VERSION >= 11u,
+              "pulp-embed-juce requires pulp_view_embed ABI v11 or newer. "
+              "Point -DPULP_VIEW_EMBED_DIR at a checkout that provides it.");
 
 namespace pulp_juce {
 
@@ -34,7 +62,32 @@ struct PulpEmbedComponent::HostBridge : private juce::AudioProcessorListener {
     PulpEmbedComponent*   owner = nullptr;  // for the host-action channel
     std::unordered_map<std::string, juce::AudioProcessorParameter*> byKey;
     std::vector<std::pair<std::string, juce::AudioProcessorParameter*>> bound;
-    std::vector<float> lastPushed;  // last value pushed UI<-host, per bound entry
+    // Last value pushed UI<-host, keyed by REGISTRATION KEY rather than by index
+    // into `bound`. An index-keyed vector cannot survive a key-set change: a
+    // re-keyed or paged element inherits whatever its neighbour's index last
+    // held, so the first push under its new key looks like a no-change and is
+    // dropped. Keying by the key means a key the view has never pushed is simply
+    // absent -> it always gets a correct first push, and a key that vanishes is
+    // dropped on the next refresh.
+    std::unordered_map<std::string, float> lastPushed;
+
+    // The host->UI pump's dirty gate. Two independent things can invalidate the
+    // pump's key->parameter bindings, so both are tracked:
+    //
+    //  keysDirty — the HOST's parameter tree moved (audioProcessorChanged). Keys
+    //      the view registers may newly resolve or stop resolving, and a removed
+    //      parameter would leave `bound` holding a dangling pointer.
+    //  lastKeyGeneration — the VIEW's key set moved (a paged/tabbed control
+    //      re-keyed an element, or a reload rebuilt the bridge). This is driven
+    //      from inside the view, so the ABI's generation counter is the only
+    //      signal the adapter gets; it is read once per tick as an integer
+    //      compare (see pumpHostToUi).
+    //
+    // Without the gate the pump would re-enumerate the whole ABI key set every
+    // tick at 30 Hz; with it, the steady state is a float compare per bound entry.
+    std::atomic<bool> keysDirty{true};
+    uint64_t lastKeyGeneration = 0;  // UI thread only
+    int      keyResolveCount = 0;    // diagnostic: times the gate actually fired
 
     // Resolve UI->host writes against the LIVE all-parameters map (findAny),
     // NOT the static create-time byKey snapshot. Previously a
@@ -130,6 +183,27 @@ struct PulpEmbedComponent::HostBridge : private juce::AudioProcessorListener {
         }
         return n;
     }
+    // Discrete step count for `key`, or 0 for continuous/unknown (the ABI's
+    // single don't-know answer). This is the divisor authority for a discrete
+    // control: a design radio with 3 visible options may be bound to a 6-step
+    // parameter, and only the host knows which is real.
+    //
+    // JUCE has no "is continuous" predicate — AudioProcessorParameter::getNumSteps
+    // returns a large SENTINEL (AudioProcessor::getDefaultNumParameterSteps(),
+    // 0x7fffffff) for a parameter that never declared a step interval, so a
+    // continuous param would otherwise report an absurd count. Map the sentinel,
+    // and any non-positive answer, to the contract's 0.
+    int32_t stepCount(const char* key) {
+        auto* p = findAny(key);
+        if (p == nullptr) return 0;
+        const int steps = p->getNumSteps();
+        if (steps >= juce::AudioProcessor::getDefaultNumParameterSteps()) return 0;
+        return steps > 0 ? static_cast<int32_t>(steps) : 0;
+    }
+    static int32_t hostParamSteps(void* ctx, const char* key) {
+        return static_cast<HostBridge*>(ctx)->stepCount(key);
+    }
+
     static int hostAction(void* ctx, const char* action, const char* args_json) {
         auto* b = static_cast<HostBridge*>(ctx);
         if (b->owner == nullptr) return 0;
@@ -139,8 +213,12 @@ struct PulpEmbedComponent::HostBridge : private juce::AudioProcessorListener {
     }
 
     // juce::AudioProcessorListener — only the tree-shape change matters here.
+    // It invalidates BOTH derived maps: the paramID view (allById) and the
+    // pump's key->parameter bindings, whose raw parameter pointers would
+    // otherwise dangle if the host removed a parameter.
     void audioProcessorChanged(juce::AudioProcessor*, const ChangeDetails&) override {
         allDirty.store(true);
+        keysDirty.store(true);
     }
     void audioProcessorParameterChanged(juce::AudioProcessor*, int, float) override {}
 
@@ -203,11 +281,18 @@ PulpEmbedComponent::PulpEmbedComponent(pulp::embed::NativeViewFactory factory,
 PulpEmbedDesc PulpEmbedComponent::buildDesc(int logicalWidth, int logicalHeight) const {
     PulpEmbedDesc desc{};
     desc.struct_size = sizeof(PulpEmbedDesc);
-    // Clamp to what the RUNTIME library supports (statically-linked shim today,
-    // but a future prebuilt dylib may predate these headers). check_desc rejects
+    // Clamp to what the RUNTIME library supports. check_desc rejects
     // abi_version > library version, so a header-newer-than-library skew must
     // negotiate DOWN — the shim's struct_size/offset clamp then simply ignores
     // callbacks the older library doesn't know about.
+    //
+    // This is the RUNTIME axis, and it is narrower than it looks: the library is
+    // built from the same checkout as the header (add_subdirectory), so today
+    // the two cannot skew and this clamp is a no-op. It covers only the desc's
+    // callback tail for a hypothetical future prebuilt dylib — NOT the v10/v11
+    // entry points this file calls unconditionally, which such a dylib would
+    // fail to resolve. Supporting an older runtime means resolving those
+    // dynamically, not tightening this line.
     desc.abi_version = static_cast<uint32_t>(
         juce::jmin<uint32_t>(PULP_VIEW_EMBED_ABI_VERSION, pulp_embed_abi_version()));
     desc.logical_width = logicalWidth;
@@ -229,17 +314,14 @@ PulpEmbedDesc PulpEmbedComponent::buildDesc(int logicalWidth, int logicalHeight)
         // ABI v6 string side-channel (text_field <-> plugin state), same host_ctx.
         desc.host.set_string = &HostBridge::setString;
         desc.host.get_string = &HostBridge::getString;
-       #if PULP_VIEW_EMBED_ABI_VERSION >= 8
-        // ABI v8 tail-append: runtime host-param accessor + action channel.
-        // Gated on the header version so the adapter still compiles against a
-        // pre-v8 pulp_view_embed.h (the struct lacks these members there). The
-        // trampolines above are unconditional and unit-tested via the
-        // hostHasParam / hostParamDisplayText / dispatchHostAction seams, so the
-        // backing is exercised even before the v8 ABI lands in the sibling repo.
+        // v8 tail-append: runtime host-param accessor + action channel.
         desc.host.has_param = &HostBridge::hasParam;
         desc.host.param_display_text = &HostBridge::paramDisplayText;
         desc.host.host_action = &HostBridge::hostAction;
-       #endif
+        // v10 tail-append: the host's discrete step count per key. A runtime
+        // library older than the header stops before this field (struct_size
+        // gating), so the trampoline is simply never called.
+        desc.host.host_param_steps = &HostBridge::hostParamSteps;
     }
     return desc;
 }
@@ -338,50 +420,82 @@ void PulpEmbedComponent::createViewFromFactory(pulp::embed::NativeViewFactory fa
     attachAndStart();
 }
 
-void PulpEmbedComponent::resolveParameterBindings() {
-    if (bridge_ == nullptr || view_ == nullptr) return;
+// Re-enumerate the view's registration keys and re-resolve each against the LIVE
+// parameter map, replacing any previous bindings.
+//
+// The view's key set is NOT fixed for its lifetime: a paged/tabbed control
+// re-keys its elements at runtime, and a bundle reload rebuilds the list
+// wholesale. Resolving through findAny (the same live accessor the UI->host
+// writes already use) is what makes a late-added or re-keyed parameter bind at
+// all — a create-time snapshot answers for keys that no longer exist and misses
+// the ones that do.
+void PulpEmbedComponent::refreshBoundKeys() {
+    ++bridge_->keyResolveCount;
+    bridge_->byKey.clear();
+    bridge_->bound.clear();
 
-    // Index the processor's parameters by their string ID (e.g. APVTS
-    // ParameterID). Parameters without a string ID can't be addressed by the
-    // design's key contract and are skipped.
-    std::unordered_map<std::string, juce::AudioProcessorParameter*> byId;
-    for (auto* p : bridge_->proc.getParameters())
-        if (auto* wid = dynamic_cast<juce::AudioProcessorParameterWithID*>(p))
-            byId[wid->paramID.toStdString()] = p;
-
-    // Map each design control key to a matching parameter ID. Unmatched keys
-    // stay visual-only (no binding) — never guessed.
+    // Unmatched keys stay visual-only (no binding) — never guessed.
     const int32_t n = pulp_embed_param_count(view_);
     for (int32_t i = 0; i < n; ++i) {
         char key[256] = {0};
         pulp_embed_param_key(view_, i, key, sizeof key);
-        const auto it = byId.find(key);
-        if (it == byId.end()) continue;
-        bridge_->byKey[key] = it->second;
-        bridge_->bound.emplace_back(key, it->second);
+        auto* p = bridge_->findAny(key);
+        if (p == nullptr) continue;
+        bridge_->byKey[key] = p;
+        bridge_->bound.emplace_back(key, p);
     }
-    bridge_->lastPushed.assign(bridge_->bound.size(), -1.0f);
+
+    // Forget the push memo for any key the view no longer registers, so a key
+    // that later comes back is pushed fresh rather than compared against a value
+    // from a previous binding.
+    for (auto it = bridge_->lastPushed.begin(); it != bridge_->lastPushed.end();)
+        it = bridge_->byKey.count(it->first) ? std::next(it)
+                                             : bridge_->lastPushed.erase(it);
+}
+
+// The dirty gate. Re-resolves only when the host's parameter tree moved
+// (keysDirty) or the view's key set moved (the ABI generation counter changed) —
+// otherwise this is one atomic read plus one integer compare, and the caller
+// falls straight through to the value poll.
+void PulpEmbedComponent::refreshBoundKeysIfDirty() {
+    const uint64_t gen = pulp_embed_param_key_generation(view_);
+    const bool hostMoved = bridge_->keysDirty.exchange(false);
+    if (!hostMoved && gen == bridge_->lastKeyGeneration) return;
+    bridge_->lastKeyGeneration = gen;
+    refreshBoundKeys();
+}
+
+void PulpEmbedComponent::resolveParameterBindings() {
+    if (bridge_ == nullptr || view_ == nullptr) return;
+    bridge_->keysDirty.store(true);
+    refreshBoundKeysIfDirty();
 
     // Push initial values UI<-host so controls reflect the current state on open.
-    for (size_t i = 0; i < bridge_->bound.size(); ++i) {
-        const float v = bridge_->bound[i].second->getValue();
-        pulp_embed_param_changed(view_, bridge_->bound[i].first.c_str(), v);
-        bridge_->lastPushed[i] = v;
+    for (const auto& [key, p] : bridge_->bound) {
+        const float v = p->getValue();
+        pulp_embed_param_changed(view_, key.c_str(), v);
+        bridge_->lastPushed[key] = v;
     }
 }
 
 void PulpEmbedComponent::pumpHostToUi() {
     if (bridge_ == nullptr || view_ == nullptr) return;
+    // Re-resolve the key set only when something can have changed it; the
+    // steady-state pump below stays a cheap float compare per bound entry.
+    refreshBoundKeysIfDirty();
+
     // Poll bound parameters on the UI thread (pulp_embed_param_changed is
     // UI-thread-only) and push host-side changes — automation, preset recall,
-    // a sibling editor — into the matching control. Cheap float compares; fine
-    // for the hundreds-of-params case at 30 Hz.
-    for (size_t i = 0; i < bridge_->bound.size(); ++i) {
-        const float v = bridge_->bound[i].second->getValue();
-        if (v != bridge_->lastPushed[i]) {
-            pulp_embed_param_changed(view_, bridge_->bound[i].first.c_str(), v);
-            bridge_->lastPushed[i] = v;
-        }
+    // a sibling editor — into the matching control. Fine for the
+    // hundreds-of-params case at 30 Hz.
+    for (const auto& [key, p] : bridge_->bound) {
+        const float v = p->getValue();
+        // An absent memo entry is a key this view has not pushed yet (a fresh
+        // bind, or one re-keyed since the last refresh) — it must always push.
+        const auto memo = bridge_->lastPushed.find(key);
+        if (memo != bridge_->lastPushed.end() && memo->second == v) continue;
+        pulp_embed_param_changed(view_, key.c_str(), v);
+        bridge_->lastPushed[key] = v;
     }
 }
 
@@ -401,6 +515,17 @@ juce::String PulpEmbedComponent::hostParamDisplayText(const juce::String& key,
     std::string out;
     if (!bridge_->displayText(key.toRawUTF8(), normalized, out)) return {};
     return juce::String::fromUTF8(out.c_str());
+}
+
+int PulpEmbedComponent::hostParamStepCount(const juce::String& key) const {
+    if (bridge_ == nullptr) return 0;
+    return static_cast<int>(bridge_->stepCount(key.toRawUTF8()));
+}
+
+void PulpEmbedComponent::syncFromHost() { pumpHostToUi(); }
+
+int PulpEmbedComponent::keyResolveCount() const noexcept {
+    return bridge_ != nullptr ? bridge_->keyResolveCount : 0;
 }
 
 bool PulpEmbedComponent::hostWriteParam(const juce::String& key, double normalized) {
@@ -545,6 +670,129 @@ double PulpEmbedComponent::controlValue(int index) const {
     if (view_ == nullptr || index < 0 || index >= pulp_embed_param_count(view_))
         return -1.0;
     return pulp_embed_param_value(view_, index);
+}
+
+namespace {
+// Drive-loop tuning. The loop MEASURES the control's response instead of
+// modelling it, so these only bound the search, they do not encode any law.
+constexpr double kDriveTolerance = 1.0e-3;  // "arrived" (values are normalized)
+constexpr double kDriveProbePx   = 12.0;    // first probe travel, view px
+constexpr int    kDriveMaxSteps  = 16;      // secant refinements before giving up
+constexpr double kDriveDeadZone  = 1.0e-9;  // below this a probe moved nothing
+}  // namespace
+
+bool PulpEmbedComponent::simulateParamDragToValue(const juce::String& key,
+                                                  double normalized) {
+    if (view_ == nullptr) return false;
+
+    const int index = indexOfKey(key);
+    if (index < 0) {
+        // A key the view does not register. Loud, because the caller believes this
+        // control exists — a quiet false would let a typo'd or renamed key look
+        // like a tested control forever.
+        juce::Logger::writeToLog("PulpEmbedComponent::simulateParamDragToValue: no control "
+                                 "registered under key '" + key + "'");
+        return false;
+    }
+
+    double target = juce::jlimit(0.0, 1.0, normalized);
+    // Snap onto the HOST's step grid for a discrete parameter. The count is a
+    // number of steps, so the last index -- and the divisor -- is count - 1.
+    // The design's own option count is NOT the authority here (a design may draw
+    // fewer options than the parameter has steps), which is why this asks the host.
+    //
+    // Read through the embed rather than hostParamStepCount(): both ultimately
+    // come from this component -- the v10 callback trampolines into it -- but the
+    // embed answers from the snapshot it refreshes at tick, and that snapshot is
+    // what the VIEW scales the control by. This drive presses the control and then
+    // verifies arrival with controlValue(), a view-side read, so its target has to
+    // sit on the grid the view is actually on. Snapping to the live map instead
+    // would, in the window between a host-side change and the next tick, compute a
+    // target the control cannot land on and then report the miss as a failure.
+    const int steps = static_cast<int>(pulp_embed_param_steps(view_, key.toRawUTF8()));
+    if (steps > 1) {
+        const double divisor = static_cast<double>(steps - 1);
+        target = std::round(target * divisor) / divisor;
+    }
+
+    double hx = 0.0, hy = 0.0;
+    if (pulp_embed_param_hit_point(view_, index, &hx, &hy) != PULP_EMBED_OK) {
+        char err[512] = {0};
+        pulp_embed_last_error(view_, err, sizeof err);
+        juce::Logger::writeToLog("PulpEmbedComponent::simulateParamDragToValue: cannot locate "
+                                 "control '" + key + "': " + juce::String::fromUTF8(err));
+        return false;
+    }
+
+    // Already there: do nothing at all, and in particular do NOT press. A press is
+    // not a neutral probe — on a latching control (a toggle) it FLIPS, so pressing
+    // first and asking questions after would drive a correct control to the wrong
+    // value and then report failure. Nothing to do is a success.
+    if (std::abs(controlValue(index) - target) <= kDriveTolerance) return true;
+
+    // From here on a gesture is open, so every exit must release it: leaving the
+    // pointer captured would strand the host's undo bracket open and wedge the
+    // next drive.
+    pulp_embed_dispatch_mouse_down(view_, hx, hy);
+
+    double y0 = hy, v0 = controlValue(index);
+    const auto release = [&](double y) {
+        pulp_embed_dispatch_mouse_up(view_, hx, y);
+        return std::abs(controlValue(index) - target) <= kDriveTolerance;
+    };
+    // A latching control commits on the press itself and ignores the drag, so it
+    // has already arrived (or never will) by now.
+    if (std::abs(v0 - target) <= kDriveTolerance) return release(y0);
+
+    // Probe once TOWARDS the target to measure the control's response. Probing
+    // toward it keeps the sample off the far clamp, where the response would read
+    // as flat. Which way is "increase" is the control's business, so if the first
+    // direction moves nothing, try the other before concluding it is dead.
+    const auto probe = [&](double dir) {
+        const double y = hy - dir * kDriveProbePx;
+        pulp_embed_dispatch_mouse_drag(view_, hx, y);
+        return std::pair<double, double>{y, controlValue(index)};
+    };
+    auto [y1, v1] = probe(target > v0 ? 1.0 : -1.0);
+    if (std::abs(v1 - v0) < kDriveDeadZone) std::tie(y1, v1) = probe(target > v0 ? -1.0 : 1.0);
+    if (std::abs(v1 - v0) < kDriveDeadZone) {
+        juce::Logger::writeToLog("PulpEmbedComponent::simulateParamDragToValue: control '" + key +
+                                 "' did not respond to a drag (is it enabled / draggable?)");
+        release(y1);
+        return false;
+    }
+
+    // Secant search on the control's OWN response curve: each drag is measured,
+    // never predicted. This is what keeps the drive independent of the drag law --
+    // sensitivity, direction and scaling can all change in the view without
+    // touching this, and a law that regressed would fail to converge rather than
+    // be faithfully reproduced by a matching inverse here.
+    for (int step = 0; step < kDriveMaxSteps && std::abs(v1 - target) > kDriveTolerance; ++step) {
+        const double slope = (v1 - v0) / (y1 - y0);
+        if (std::abs(slope) < kDriveDeadZone) break;  // flat: clamped or stuck
+        const double y2 = y1 + (target - v1) / slope;
+        pulp_embed_dispatch_mouse_drag(view_, hx, y2);
+        y0 = y1; v0 = v1;
+        y1 = y2; v1 = controlValue(index);
+    }
+
+    const bool arrived = release(y1);
+    if (!arrived)
+        juce::Logger::writeToLog("PulpEmbedComponent::simulateParamDragToValue: control '" + key +
+                                 "' stopped at " + juce::String(controlValue(index), 4) +
+                                 ", short of " + juce::String(target, 4));
+    return arrived;
+}
+
+int PulpEmbedComponent::indexOfKey(const juce::String& key) const {
+    if (view_ == nullptr) return -1;
+    const int32_t n = pulp_embed_param_count(view_);
+    for (int32_t i = 0; i < n; ++i) {
+        char buf[256] = {0};
+        pulp_embed_param_key(view_, i, buf, sizeof buf);
+        if (key == juce::String::fromUTF8(buf)) return i;
+    }
+    return -1;
 }
 
 std::vector<PulpEmbedComponent::DesignParamDesc>

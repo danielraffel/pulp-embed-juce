@@ -91,6 +91,46 @@ public:
     // never per frame).
     juce::String hostParamDisplayText(const juce::String& key, double normalized) const;
 
+    // ── host param step count (ABI v10 adapter half) ───────────────────────
+    // The number of DISCRETE steps the host's parameter `key` has, or 0 for a
+    // continuous parameter / an unknown key / no processor. 0 means "continuous
+    // or unknown" — callers must not distinguish those.
+    //
+    // This is the divisor authority for a discrete control, and the design's own
+    // option count is NOT it: a design may draw 3 radio options for a parameter
+    // the host defines with 6 steps, so a control that derives its value from the
+    // number of options it draws addresses the wrong steps. The value is a step
+    // COUNT, not a pre-computed divisor — derive the divisor from it under the
+    // relevant normalization convention.
+    //
+    // This is the single source of truth the v10 host_param_steps callback
+    // trampolines into. It resolves against the SAME live parameter map as
+    // hostHasParam, so it follows a paged/re-keyed control.
+    //
+    // It is the HOST side of the count, and it is deliberately not what the view
+    // scales by. The embed snapshots this answer once per tick, and the view — and
+    // simulateParamDragToValue, which must agree with the view — read that
+    // snapshot (pulp_embed_param_steps). So this reports what the parameter says
+    // NOW, which can lead the view by up to one tick after a host-side change.
+    // Prefer it for host-side questions; for "what grid is the control on", ask
+    // the embed.
+    int hostParamStepCount(const juce::String& key) const;
+
+    // Run one host->UI pump pass now, instead of waiting for the next 30 Hz tick:
+    // re-resolve the key set if it moved, then push any changed host values into
+    // the matching controls. The tick calls this for you — reach for it when a
+    // host has just changed state and wants the UI to reflect it immediately, or
+    // to drive the pump deterministically from a headless test with no message
+    // loop. No-op when constructed without a processor.
+    void syncFromHost();
+
+    // How many times the pump has re-resolved the view's key set. Steady state
+    // holds this CONSTANT — it moves only when the host's parameter tree changes
+    // (audioProcessorChanged) or the view re-keys an element. Exposed so the
+    // dirty gate is observable: a rising count on an idle UI means the pump is
+    // re-enumerating the ABI every tick.
+    int keyResolveCount() const noexcept;
+
     // UI->host write seams (the single source of truth the v8 set_param /
     // begin_gesture / end_gesture callbacks trampoline into). They resolve keys
     // against the SAME live parameter map as hostHasParam, so a paged/dynamic
@@ -142,9 +182,18 @@ public:
     // `isDiscrete` + `optionCount` choose AudioParameterChoice/Bool vs Float;
     // `defaultNorm` is the imported default [0,1]. `name`/`unit` are populated
     // once the importer carries them (empty until then — fall back to `key`).
+    //
+    // Only controls that carry a VALUE appear here. A design's buttons, readouts,
+    // and text fields are not parameters and are absent — build an APVTS from
+    // this list and you get exactly the design's real controls, nothing to bind a
+    // dead parameter to. Under ABI v10 the buttons DID appear (as knobs), so a
+    // plugin that pinned these indices must re-enumerate against v11; the keys
+    // are stable, the indices are not. See the embed COMPAT.md.
     struct DesignParamDesc {
         juce::String key;
-        juce::String widgetKind;   // "knob"/"fader"/"toggle"/"dropdown"/"tab_group"/"stepper"
+        // "knob"/"fader"/"toggle"/"xy_pad" (continuous),
+        // "dropdown"/"tab_group"/"stepper" (discrete).
+        juce::String widgetKind;
         bool         isDiscrete = false;
         int          optionCount = 0;
         double       defaultNorm = 0.0;
@@ -163,6 +212,46 @@ public:
     // host<->UI initial sync — used to verify that an UNBOUND control kept its
     // imported default instead of snapping to 0.
     double controlValue(int index) const;
+
+    // The ABI index of the design control registered under `key`, or -1 if the
+    // view registers no such key. The index is what the index-addressed calls
+    // (controlValue, designParams()) take, so this is the bridge from the key a
+    // host thinks in to the index the ABI reports. Reflects the LIVE key set, so
+    // it follows a paged/re-keyed control.
+    int indexOfKey(const juce::String& key) const;
+
+    // ── drive a control by (key, value) ─────────────────────────────────────
+    // Move the design control registered under `key` to the normalized [0,1]
+    // `normalized`, by SYNTHESIZING A REAL POINTER GESTURE on it: resolve the key
+    // to its control, ask the ABI where that control is, then press / drag / release
+    // at those coordinates. It runs the same code a user's mouse runs — hit-test,
+    // capture, the control's own drag law, its emit path, the host bridge — so a
+    // regression anywhere along it makes this FAIL rather than pass. That is the
+    // point: a helper that reached past hit-testing and poked the value in would
+    // stay green while the UI was unclickable.
+    //
+    // Returns true only when the control actually ARRIVED at the value (verified
+    // by reading it back). Returns false — never a silent no-op — for an unknown
+    // key, a control the ABI cannot locate, or a control that does not respond to
+    // the drag; each logs which of those it was. A false here means "this control
+    // is not drivable", which in a QA harness must read as a failure, not a pass.
+    //
+    // `normalized` is snapped to the host parameter's step grid first when the host
+    // reports `key` as discrete (see hostParamStepCount), so a caller can pass a
+    // rounded-off value and still land on the intended step.
+    //
+    // What it does NOT assert is the HOST parameter: this drives the UI and returns
+    // whether the UI arrived. Whether the write reached the host parameter is the
+    // very thing a caller should assert separately — see hostParamValue-style checks
+    // in a harness — because folding it in here would hide a broken UI->host bridge
+    // behind a true return. Note also that a host parameter write lands on the host
+    // parameter SYNCHRONOUSLY, while the plugin's own DSP state is pulled from it on
+    // the audio thread per block: assert the parameter, not the engine, right after
+    // this call — a headless harness may have no audio callback at all.
+    //
+    // UI thread only, and it needs the view laid out (a non-zero size) — the
+    // control's coordinates do not exist before its first layout.
+    bool simulateParamDragToValue(const juce::String& key, double normalized);
 
     // Static greenfield entry point: read a design's parameter descriptors WITHOUT
     // an editor/window (offscreen), so a processor can build its
@@ -269,6 +358,15 @@ private:
     // Push any host-side parameter changes (automation / preset recall) into the
     // matching controls. Called from the 30 Hz tick. No-op when bridge_ is null.
     void pumpHostToUi();
+    // Re-enumerate the view's registration keys and re-resolve each against the
+    // LIVE parameter map, replacing the previous bindings. The view's key set is
+    // not fixed for its lifetime — a paged control re-keys elements and a reload
+    // rebuilds the list — so these are refreshed, never snapshotted at mount.
+    void refreshBoundKeys();
+    // refreshBoundKeys(), gated on something actually having changed: the host's
+    // parameter tree (audioProcessorChanged) or the view's key set (the ABI's
+    // key generation counter). Cheap enough to call every tick.
+    void refreshBoundKeysIfDirty();
 
     struct HostBridge;  // defined in the .cpp; holds the juce::AudioProcessor map
     std::unique_ptr<HostBridge> bridge_;

@@ -6,32 +6,28 @@
 //   • STATIC top-level controls  — two knobs ("input.gain", "mix") whose
 //     DesignFrameElement::param_key is set once at construction. The embed's
 //     native-view lane binds these to the host's parameters by key==paramID with
-//     zero glue (element_param_key / element_for_param_key on origin/main).
+//     zero glue (element_param_key / element_for_param_key).
 //
 //   • A DYNAMIC "rack page"       — two knobs whose param_key is RE-ASSIGNED with
-//     set_element_param_key(i, key) when the user pages to another slot. Paging
-//     marks the embed's key→index registry dirty; on the next tick the shim
-//     rebuilds and resolves the new keys against the host's LIVE parameter table
-//     (the ABI v8 has_param / param_display_text surface the adapter backs). A
-//     value_label reads back the active slot's display text.
+//     set_element_param_key(i, key) when the user pages to another slot. The
+//     re-key re-points the embed's binding + key→index registry at the new key
+//     (both directions follow it), and bumps the ABI's key generation so the
+//     adapter's host→UI pump re-resolves the new keys against the host's LIVE
+//     parameter table (the ABI v8 has_param / param_display_text surface the
+//     adapter backs). A value_label reads back the active slot's display text.
 //
-//   • One Kind::action button     — "load_preset". In the live plugin the shim's
-//     on_action→host_action bridge (routed by the SDK's route_actions_to_host)
-//     forwards this over the ABI to PulpEmbedComponent::onHostAction. Paging
-//     chevrons ("rack.prev"/"rack.next") are handled view-internally; any other
-//     action id falls through to host_action_hook_ (the seam route_actions_to_host
-//     populates).
+//   • One Kind::action button     — "load_preset". In the live plugin the view
+//     sends this out View::host_actions(), the channel the shim backs with the
+//     ABI's host_action callback, landing on PulpEmbedComponent::onHostAction.
+//     Paging chevrons ("rack.prev"/"rack.next") are handled view-internally and
+//     deliberately never reach the host. With no host surface installed (the
+//     headless self-check, previews) the id falls through to host_action_hook_.
 //
 // Everything is drawn from an inline SVG so the fixture needs no external assets.
-//
-// DEPENDENCY NOTE: set_element_param_key() is a newer SDK addition. It is
-// NOT yet on Pulp origin/main (which has param_key / element_param_key /
-// element_for_param_key but not the re-key mutator). This view is therefore
-// compile-shaped against the final DesignFrameView surface; it builds once
-// the re-key mutator lands. See examples/synthetic-rack/README.md.
 #pragma once
 
 #include <pulp/view/design_frame_view.hpp>
+#include <pulp/view/host_param_surface.hpp>
 #include <pulp/view/view.hpp>
 
 #include <functional>
@@ -79,14 +75,27 @@ public:
         on_action = [this](const std::string& id) {
             if (id == "rack.next") { pageBy(+1); return; }
             if (id == "rack.prev") { pageBy(-1); return; }
+            // Non-paging buttons are the HOST's commands, so they go out the
+            // view-side host-action channel — which the embed backs with the ABI's
+            // host_action callback, landing on PulpEmbedComponent::onHostAction.
+            //
+            // Sent from here rather than by arming the frame's route_actions_to_host:
+            // that routes EVERY Kind::action button, which would push the paging
+            // chevrons above at the host as commands it never asked for. This view
+            // knows which of its buttons are the host's; the blanket seam does not.
+            //
+            // Null whenever no host installed a surface (the headless self-check,
+            // previews, screenshots) — there the hook below is the only listener.
+            if (auto* actions = host_actions()) actions->send_host_action(id, "{}");
             if (host_action_hook_) host_action_hook_(id);
         };
         applySlotLabel();
     }
 
-    // The seam route_actions_to_host populates so non-paging Kind::action
-    // buttons reach the foreign host (→ PulpEmbedComponent::onHostAction). Left
-    // null in previews/tests, where load_preset is simply a no-op locally.
+    // Local fallback for non-paging Kind::action buttons, for the contexts that
+    // have no host surface to send to (the headless self-check, previews). In the
+    // live plugin the host channel above is what reaches the foreign host; this is
+    // left null there and load_preset is simply a no-op locally without it.
     void set_host_action_hook(std::function<void(const std::string&)> fn) {
         host_action_hook_ = std::move(fn);
     }

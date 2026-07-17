@@ -104,11 +104,24 @@ the element when the page changes and let the runtime accessor resolve it:
 ```cpp
 // in the view, on paging:
 set_element_param_key(rackKnobA, "slot" + std::to_string(slot) + ".gain");
-// the embed marks its key→index registry dirty and rebinds on the next tick.
+// The embed re-points that element's binding AND its key→index registry at the
+// new key, so UI→host writes/gestures and host→UI pushes both follow it. It also
+// bumps the ABI's key generation, which is what tells the adapter's host→UI pump
+// to re-resolve — a re-key happens inside the view, so nothing else would.
 
 // in the editor, query live membership / display text (ABI v8):
 if (embed_->hostHasParam("slot2.cutoff"))
     label = embed_->hostParamDisplayText("slot2.cutoff", 0.5);  // "50 %"
+```
+
+**Discrete controls: the divisor comes from the PARAMETER, not the UI.** A radio
+with 3 visible options bound to a 6-step parameter must derive its value from the
+parameter's step count — the design cannot know it, so ask the host (ABI v10):
+
+```cpp
+const int steps = embed_->hostParamStepCount("lfo_waveform");  // 6, not 3
+// 0 = continuous or unknown (indistinguishable by contract) — treat it as
+// "no step divisor", never as a count of zero.
 ```
 
 For view→host **commands** (load preset, insert/reorder rack slots), declare a
