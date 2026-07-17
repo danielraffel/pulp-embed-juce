@@ -182,9 +182,18 @@ public:
     // `isDiscrete` + `optionCount` choose AudioParameterChoice/Bool vs Float;
     // `defaultNorm` is the imported default [0,1]. `name`/`unit` are populated
     // once the importer carries them (empty until then — fall back to `key`).
+    //
+    // Only controls that carry a VALUE appear here. A design's buttons, readouts,
+    // and text fields are not parameters and are absent — build an APVTS from
+    // this list and you get exactly the design's real controls, nothing to bind a
+    // dead parameter to. Under ABI v10 the buttons DID appear (as knobs), so a
+    // plugin that pinned these indices must re-enumerate against v11; the keys
+    // are stable, the indices are not. See the embed COMPAT.md.
     struct DesignParamDesc {
         juce::String key;
-        juce::String widgetKind;   // "knob"/"fader"/"toggle"/"dropdown"/"tab_group"/"stepper"
+        // "knob"/"fader"/"toggle"/"xy_pad" (continuous),
+        // "dropdown"/"tab_group"/"stepper" (discrete).
+        juce::String widgetKind;
         bool         isDiscrete = false;
         int          optionCount = 0;
         double       defaultNorm = 0.0;
