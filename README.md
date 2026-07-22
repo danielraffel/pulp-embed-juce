@@ -24,7 +24,7 @@ Three JUCE pieces, and they are **not interchangeable**:
 existing plugin's UI across, use
 [`pulp-import-juce`](https://github.com/danielraffel/pulp-import-juce), not the
 template. Canonical map: the Pulp SDK guide
-[**Putting a Pulp UI in a JUCE plugin**](https://github.com/danielraffel/pulp/blob/main/docs/guides/juce-embed.md).
+[**Putting a Pulp UI in a JUCE plugin**](https://github.com/Generous-Corp/pulp/blob/main/docs/guides/juce-embed.md).
 
 > **Note on this repo's own examples.** `examples/` here (including
 > `examples/synthetic-rack/`) `add_subdirectory` the adapter — they exist to
